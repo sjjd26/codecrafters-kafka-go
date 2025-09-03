@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 )
@@ -41,43 +43,51 @@ func main() {
 		os.Exit(1)
 	}
 
-	readBuf := make([]byte, 1024)
-	_, err = conn.Read(readBuf)
-	if err != nil {
-		panic(fmt.Sprintf("Error reading input %s", err))
-	}
+	for {
+		readBuf := make([]byte, 1024)
+		n, err := conn.Read(readBuf)
+		if errors.Is(err, net.ErrClosed) {
+			log.Println("Connection closed")
+		}
+		if err != nil {
+			panic(fmt.Sprintf("Error reading input %s", err))
+		}
+		if n < 12 {
+			panic(fmt.Sprintln("Not enough bytes read"))
+		}
 
-	// get correlation_id from v2 request header: https://kafka.apache.org/protocol.html#protocol_messages
-	// 4 bytes for message_size
-	// 2 bytes for request_api_key
-	// 2 bytes for request_api_version (6:8)
-	requestApiVersion := readBuf[6:8]
-	requestApiVersionInt := int16(binary.BigEndian.Uint16(requestApiVersion))
-	// 4 bytes for correlation_id (8:12)
-	correlationId := readBuf[8:12]
+		// get correlation_id from v2 request header: https://kafka.apache.org/protocol.html#protocol_messages
+		// 4 bytes for message_size
+		// 2 bytes for request_api_key
+		// 2 bytes for request_api_version (6:8)
+		requestApiVersion := readBuf[6:8]
+		requestApiVersionInt := int16(binary.BigEndian.Uint16(requestApiVersion))
+		// 4 bytes for correlation_id (8:12)
+		correlationId := readBuf[8:12]
 
-	// Build response, first add correlation_id header
-	response := correlationId
+		// Build response, first add correlation_id header
+		response := correlationId
 
-	// Api Versions response body:
-	// Add error code
-	if requestApiVersionInt > maxApiVersionsVersion || requestApiVersionInt < minApiVersionsVersion {
-		response = binary.BigEndian.AppendUint16(response, invalidApiVersionErrorCode)
-	} else {
-		// 2 byte error code
-		response = append(response, 0x00, 0x00)
-		response = append(response, createApiVersionsBytes()...)
-		// 4 byte throttle time int + tag buffer
-		response = append(response, 0x00, 0x00, 0x00, 0x00, tagBuffer)
-	}
+		// Api Versions response body:
+		// Add error code
+		if requestApiVersionInt > maxApiVersionsVersion || requestApiVersionInt < minApiVersionsVersion {
+			response = binary.BigEndian.AppendUint16(response, invalidApiVersionErrorCode)
+		} else {
+			// 2 byte error code
+			response = append(response, 0x00, 0x00)
+			response = append(response, createApiVersionsBytes()...)
+			// 4 byte throttle time int + tag buffer
+			response = append(response, 0x00, 0x00, 0x00, 0x00, tagBuffer)
+		}
 
-	// now add the message size at the beginning
-	messageSize := binary.BigEndian.AppendUint32(nil, uint32(len(response)))
-	response = append(messageSize, response...)
+		// now add the message size at the beginning
+		messageSize := binary.BigEndian.AppendUint32(nil, uint32(len(response)))
+		response = append(messageSize, response...)
 
-	_, err = conn.Write(response)
-	if err != nil {
-		panic(fmt.Sprintf("Error writing response: %s", err))
+		_, err = conn.Write(response)
+		if err != nil {
+			panic(fmt.Sprintf("Error writing response: %s", err))
+		}
 	}
 }
 
