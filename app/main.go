@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -38,11 +37,13 @@ func main() {
 	}
 	defer listener.Close()
 	listenerFd := listener.Fd()
+	// defer syscall.Close(int(listenerFd))
 
 	epollFd, err := syscall.EpollCreate1(0)
 	if err != nil {
 		log.Fatalf("Failed to create epoll file descriptor: %s", err)
 	}
+	defer syscall.Close(epollFd)
 
 	// need to create an event with the required settings for the listenerFd
 	// probably just read as this is the listener fd not a connection?
@@ -53,21 +54,9 @@ func main() {
 		log.Fatalf("Failed to add listener to epoll: %s", err)
 	}
 
-	eventLoop(epollFd, int(listenerFd))
-}
+	log.Printf("Added listener %v to epoll %v", int(listenerFd), epollFd)
 
-func createApiVersionsBytes() []byte {
-	// 1 array length byte + 3 * 2byte integers + 1byte tag buffer per api
-	// numBytes := len(apiVersions)*(3*2+1) + 1
-	var resp []byte
-	resp = append(resp, byte(len(apiVersions)+1))
-	for i := range apiVersions {
-		resp = binary.BigEndian.AppendUint16(resp, apiVersions[i].apiKey)
-		resp = binary.BigEndian.AppendUint16(resp, apiVersions[i].minSupported)
-		resp = binary.BigEndian.AppendUint16(resp, apiVersions[i].maxSupported)
-		resp = append(resp, tagBuffer)
-	}
-	return resp
+	eventLoop(epollFd, int(listenerFd))
 }
 
 func createNonBlockingListener(addr string) (*os.File, error) {
@@ -104,18 +93,31 @@ func setNonBlocking(network, address string, c syscall.RawConn) error {
 func addNewFd(epollFd int, fd int) error {
 	// Events int is achieved by ORing together the events that we want epoll to wait for https://man7.org/linux/man-pages/man2/epoll_ctl.2.html
 	// EPOLLIN is for read events, EPOLLERR (error) and EPOLLHUP (hangup) are both included by default
-	event := &syscall.EpollEvent{Events: syscall.EPOLLIN}
+	event := &syscall.EpollEvent{Events: syscall.EPOLLIN, Fd: int32(fd)}
 	err := syscall.EpollCtl(epollFd, syscall.EPOLL_CTL_ADD, fd, event)
 	if err != nil {
-		return fmt.Errorf("Error adding FD: %w", err)
+		return fmt.Errorf("Error adding FD %v: %w", fd, err)
+	}
+	return nil
+}
+
+func removeAndCloseFd(epollFd int, fd int) error {
+	defer syscall.Close(fd)
+	err := syscall.EpollCtl(epollFd, syscall.EPOLL_CTL_DEL, fd, nil)
+	if err != nil {
+		return fmt.Errorf("Error removing FD %v: %w", fd, err)
 	}
 	return nil
 }
 
 func eventLoop(epollFd int, listenerFd int) {
+	defer syscall.Close(epollFd)
 	events := make([]syscall.EpollEvent, 10)
 	timeoutMs := -1 // negative timeout -> indefinite
-	for {
+	exit := false
+
+	log.Println("Beginning event loop")
+	for exit == false {
 		n, err := syscall.EpollWait(epollFd, events, timeoutMs)
 		if err != nil {
 			log.Fatalf("Epoll wait returned an error: %s", err)
@@ -124,30 +126,51 @@ func eventLoop(epollFd int, listenerFd int) {
 		for i := range n {
 			fd := int(events[i].Fd)
 			if fd == listenerFd {
-				// new connection
+				// check event bitmask
+				if events[i].Events&syscall.EPOLLERR > 0 {
+					log.Fatalf("Listener received error event")
+				}
+				if events[i].Events&syscall.EPOLLHUP > 0 {
+					log.Println("Listener received hangup event")
+					exit = true
+				}
+				if events[i].Events&syscall.EPOLLIN == 0 {
+					log.Println("Listener didn't receive read event")
+					continue
+				}
+				// if read bit is present, there is a new connection
 				connFd, err := acceptNewConnection(listenerFd)
 				if err != nil {
 					log.Fatalf("Error accepting connection: %s", err)
 				}
-				addNewFd(epollFd, connFd)
+				err = addNewFd(epollFd, connFd)
+				if err != nil {
+					log.Fatalf("Error adding new conn %v to epoll: %s", connFd, err)
+				}
 			} else {
-				// new input from client conn
-
+				// check event bitmask
+				if events[i].Events&syscall.EPOLLERR > 0 {
+					log.Printf("Connection %v received error event", fd)
+					err = removeAndCloseFd(epollFd, fd)
+					if err != nil {
+						log.Fatalln(err)
+					}
+				}
+				if events[i].Events&syscall.EPOLLHUP > 0 {
+					log.Printf("Connection %v received hangup event", fd)
+					err = removeAndCloseFd(epollFd, fd)
+					if err != nil {
+						log.Fatalln(err)
+					}
+				}
+				err = handleClient(fd)
+				if err != nil {
+					log.Printf("Error handling client %v: %s", fd, err)
+				}
 			}
 		}
 	}
-
-}
-
-// Need to handle the error conditions including EPOLLHUP
-// Then handle the client inputs
-func handleEpollEventErrors(event syscall.EpollEvent) error {
-	// events int is a bitmask achieved by ORing together whichever events occurred
-	// check if an event occurred by ANDing with the specific event
-	if event.Events&syscall.EPOLLERR > 0 {
-		return nil
-	}
-	return nil
+	log.Println("Exited event loop")
 }
 
 func acceptNewConnection(listenerFd int) (int, error) {
@@ -164,39 +187,39 @@ func acceptNewConnection(listenerFd int) (int, error) {
 	return connFd, nil
 }
 
-func handleInput() {
-	l, err := net.Listen("tcp", "0.0.0.0:9092")
-	if err != nil {
-		fmt.Println("Failed to bind to port 9092")
-		os.Exit(1)
-	}
-
-	conn, err := l.Accept()
-	if err != nil {
-		fmt.Println("Error accepting connection: ", err.Error())
-		os.Exit(1)
-	}
-
+func handleClient(clientFd int) error {
+	log.Printf("Received input from client connection %v", clientFd)
 	readBuf := make([]byte, 1024)
-	n, err := conn.Read(readBuf)
-	if errors.Is(err, net.ErrClosed) {
-		log.Println("Connection closed")
-	}
+	_, err := syscall.Read(clientFd, readBuf)
 	if err != nil {
-		panic(fmt.Sprintf("Error reading input %s", err))
+		return fmt.Errorf("Error reading client input: %w", err)
 	}
-	if n < 12 {
-		panic(fmt.Sprintln("Not enough bytes read"))
+	// input := bytes.TrimRight(readBuf, "\x00\n\r\t ")
+
+	// if len(input) < 12 {
+	// 	return fmt.Errorf("Invalid input: not enough bytes")
+	// }
+
+	// for now just assume the input is always one command and valid
+	// no detailed parsing
+	response := handleInput(readBuf)
+	_, err = syscall.Write(clientFd, response)
+	if err != nil {
+		return fmt.Errorf("Error writing response to client: %w", err)
 	}
 
+	return nil
+}
+
+func handleInput(input []byte) []byte {
 	// get correlation_id from v2 request header: https://kafka.apache.org/protocol.html#protocol_messages
 	// 4 bytes for message_size
 	// 2 bytes for request_api_key
 	// 2 bytes for request_api_version (6:8)
-	requestApiVersion := readBuf[6:8]
+	requestApiVersion := input[6:8]
 	requestApiVersionInt := int16(binary.BigEndian.Uint16(requestApiVersion))
 	// 4 bytes for correlation_id (8:12)
-	correlationId := readBuf[8:12]
+	correlationId := input[8:12]
 
 	// Build response, first add correlation_id header
 	response := correlationId
@@ -217,8 +240,19 @@ func handleInput() {
 	messageSize := binary.BigEndian.AppendUint32(nil, uint32(len(response)))
 	response = append(messageSize, response...)
 
-	_, err = conn.Write(response)
-	if err != nil {
-		panic(fmt.Sprintf("Error writing response: %s", err))
+	return response
+}
+
+func createApiVersionsBytes() []byte {
+	// 1 array length byte + 3 * 2byte integers + 1byte tag buffer per api
+	// numBytes := len(apiVersions)*(3*2+1) + 1
+	var resp []byte
+	resp = append(resp, byte(len(apiVersions)+1))
+	for i := range apiVersions {
+		resp = binary.BigEndian.AppendUint16(resp, apiVersions[i].apiKey)
+		resp = binary.BigEndian.AppendUint16(resp, apiVersions[i].minSupported)
+		resp = binary.BigEndian.AppendUint16(resp, apiVersions[i].maxSupported)
+		resp = append(resp, tagBuffer)
 	}
+	return resp
 }
