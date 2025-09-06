@@ -10,10 +10,13 @@ import (
 	"syscall"
 )
 
-const minApiVersionsVersion int16 = 0
-const maxApiVersionsVersion int16 = 4
-const invalidApiVersionErrorCode uint16 = 35
-const tagBuffer = 0x00
+const MIN_API_VERSION int16 = 0
+const MAX_API_VERSION int16 = 4
+const INVALID_VERSION_ERR uint16 = 35
+const TAG_BUFFER = 0x00
+
+const API_VERSIONS uint16 = 18
+const DESCRIBE_TOPIC_PARTITIONS uint16 = 75
 
 type ApiVersion struct {
 	apiKey       uint16
@@ -22,11 +25,17 @@ type ApiVersion struct {
 }
 
 var apiVersions = []*ApiVersion{
-	// ApiVersions API
+	// ApiVersions
 	{
-		apiKey:       18,
+		apiKey:       API_VERSIONS,
 		minSupported: 3,
 		maxSupported: 4,
+	},
+	// DescribeTopicPartitions
+	{
+		apiKey:       DESCRIBE_TOPIC_PARTITIONS,
+		minSupported: 0,
+		maxSupported: 0,
 	},
 }
 
@@ -226,14 +235,14 @@ func handleInput(input []byte) []byte {
 
 	// Api Versions response body:
 	// Add error code
-	if requestApiVersionInt > maxApiVersionsVersion || requestApiVersionInt < minApiVersionsVersion {
-		response = binary.BigEndian.AppendUint16(response, invalidApiVersionErrorCode)
+	if requestApiVersionInt > MAX_API_VERSION || requestApiVersionInt < MIN_API_VERSION {
+		response = binary.BigEndian.AppendUint16(response, INVALID_VERSION_ERR)
 	} else {
 		// 2 byte error code
 		response = append(response, 0x00, 0x00)
 		response = append(response, createApiVersionsBytes()...)
 		// 4 byte throttle time int + tag buffer
-		response = append(response, 0x00, 0x00, 0x00, 0x00, tagBuffer)
+		response = append(response, 0x00, 0x00, 0x00, 0x00, TAG_BUFFER)
 	}
 
 	// now add the message size at the beginning
@@ -245,14 +254,14 @@ func handleInput(input []byte) []byte {
 
 func createApiVersionsBytes() []byte {
 	// 1 array length byte + 3 * 2byte integers + 1byte tag buffer per api
-	// numBytes := len(apiVersions)*(3*2+1) + 1
-	var resp []byte
+	numBytes := 1 + (3*2+1)*len(apiVersions)
+	resp := make([]byte, 0, numBytes)
 	resp = append(resp, byte(len(apiVersions)+1))
 	for i := range apiVersions {
 		resp = binary.BigEndian.AppendUint16(resp, apiVersions[i].apiKey)
 		resp = binary.BigEndian.AppendUint16(resp, apiVersions[i].minSupported)
 		resp = binary.BigEndian.AppendUint16(resp, apiVersions[i].maxSupported)
-		resp = append(resp, tagBuffer)
+		resp = append(resp, TAG_BUFFER)
 	}
 	return resp
 }
