@@ -10,13 +10,21 @@ import (
 	"syscall"
 )
 
-const MIN_API_VERSION int16 = 0
-const MAX_API_VERSION int16 = 4
+// const MIN_API_VERSION int16 = 0
+// const MAX_API_VERSION int16 = 4
 const INVALID_VERSION_ERR uint16 = 35
 const TAG_BUFFER = 0x00
 
 const API_VERSIONS uint16 = 18
 const DESCRIBE_TOPIC_PARTITIONS uint16 = 75
+
+type KafkaRequest struct {
+	apiKey        uint16
+	apiVersion    uint16
+	correlationId uint32
+	clientId      []byte
+	body          []byte
+}
 
 type ApiVersion struct {
 	apiKey       uint16
@@ -24,15 +32,13 @@ type ApiVersion struct {
 	maxSupported uint16
 }
 
-var apiVersions = []*ApiVersion{
-	// ApiVersions
-	{
+var apiVersions = map[uint16]*ApiVersion{
+	API_VERSIONS: &ApiVersion{
 		apiKey:       API_VERSIONS,
 		minSupported: 3,
 		maxSupported: 4,
 	},
-	// DescribeTopicPartitions
-	{
+	DESCRIBE_TOPIC_PARTITIONS: &ApiVersion{
 		apiKey:       DESCRIBE_TOPIC_PARTITIONS,
 		minSupported: 0,
 		maxSupported: 0,
@@ -205,13 +211,12 @@ func handleClient(clientFd int) error {
 	}
 	// input := bytes.TrimRight(readBuf, "\x00\n\r\t ")
 
-	// if len(input) < 12 {
-	// 	return fmt.Errorf("Invalid input: not enough bytes")
-	// }
-
 	// for now just assume the input is always one command and valid
 	// no detailed parsing
-	response := handleInput(readBuf)
+	response, err := handleInput(readBuf)
+	if err != nil {
+		return fmt.Errorf("Error handling input: %w", err)
+	}
 	_, err = syscall.Write(clientFd, response)
 	if err != nil {
 		return fmt.Errorf("Error writing response to client: %w", err)
@@ -220,40 +225,112 @@ func handleClient(clientFd int) error {
 	return nil
 }
 
-func handleInput(input []byte) []byte {
-	// get correlation_id from v2 request header: https://kafka.apache.org/protocol.html#protocol_messages
-	// 4 bytes for message_size
-	// 2 bytes for request_api_key
-	// 2 bytes for request_api_version (6:8)
-	requestApiVersion := input[6:8]
-	requestApiVersionInt := int16(binary.BigEndian.Uint16(requestApiVersion))
-	// 4 bytes for correlation_id (8:12)
-	correlationId := input[8:12]
-
-	// Build response, first add correlation_id header
-	response := correlationId
-
-	// Api Versions response body:
-	// Add error code
-	if requestApiVersionInt > MAX_API_VERSION || requestApiVersionInt < MIN_API_VERSION {
-		response = binary.BigEndian.AppendUint16(response, INVALID_VERSION_ERR)
-	} else {
-		// 2 byte error code
-		response = append(response, 0x00, 0x00)
-		response = append(response, createApiVersionsBytes()...)
-		// 4 byte throttle time int + tag buffer
-		response = append(response, 0x00, 0x00, 0x00, 0x00, TAG_BUFFER)
+func handleInput(input []byte) ([]byte, error) {
+	var request *KafkaRequest
+	request, err := parseInput(input)
+	if err != nil {
+		return nil, fmt.Errorf("Error parsing input: %w", err)
 	}
+
+	// Build response v0 header (just a correlation_id)
+	response := binary.BigEndian.AppendUint32(nil, request.correlationId)
+
+	// Add response body
+	var body []byte
+	switch request.apiKey {
+	case API_VERSIONS:
+		body, err = handleApiVersionsRequest(request)
+	case DESCRIBE_TOPIC_PARTITIONS:
+		body, err = handleDescribeTopicPartitionsRequest(request)
+	default:
+		return nil, fmt.Errorf("Unsupported request api key: %v", request.apiKey)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("Error handling request: %w", err)
+	}
+	response = append(response, body...)
 
 	// now add the message size at the beginning
 	messageSize := binary.BigEndian.AppendUint32(nil, uint32(len(response)))
 	response = append(messageSize, response...)
 
-	return response
+	return response, nil
+}
+
+func parseInput(input []byte) (*KafkaRequest, error) {
+	if len(input) < 15 {
+		return nil, fmt.Errorf("Input length, %v, is shorter than minimum 15", len(input))
+	}
+	// v2 request headers https://kafka.apache.org/protocol.html#protocol_messages
+	// 4 bytes for message_size
+	messageSize := binary.BigEndian.Uint32(input[:4])
+	if int(messageSize) < len(input)-4 {
+		return nil, fmt.Errorf("Remaining input length, %v, is shorter than declared message size: %v", len(input), messageSize)
+	}
+	// 2 bytes for request_api_key
+	apiKey := binary.BigEndian.Uint16(input[4:6])
+	// 2 bytes for request_api_version
+	apiVersion := binary.BigEndian.Uint16(input[6:8])
+	// 4 bytes for correlation_id
+	correlationId := binary.BigEndian.Uint32(input[8:12])
+	// client_id nullable string
+	clientId, err := extractNullableString(input[12:])
+	if err != nil {
+		return nil, fmt.Errorf("Error parsing client id: %w", err)
+	}
+	// 1 byte tag buffer and then message body
+	bodyStart := 4 + 2 + 2 + 4 + 2 + len(clientId) + 1
+	bodyEnd := int(messageSize) + 4
+	body := make([]byte, bodyEnd-bodyStart)
+	copy(body, input[bodyStart:bodyEnd])
+
+	return &KafkaRequest{
+		apiKey:        apiKey,
+		apiVersion:    apiVersion,
+		correlationId: correlationId,
+		clientId:      clientId,
+		body:          body,
+	}, nil
+}
+
+// Nullable string: 2 bytes for length, followed by the string
+// A null string is a string with length 0, this results in an empty byte slice
+func extractNullableString(input []byte) ([]byte, error) {
+	if len(input) < 2 {
+		return nil, fmt.Errorf("Nullable string input length, %v, is shorter than minimum 2", len(input))
+	}
+	end := int(binary.BigEndian.Uint16(input[:2])) + 2
+	if len(input) < end {
+		return nil, fmt.Errorf("Declared string end, %v, is longer than input length %v", end, len(input))
+	}
+	str := make([]byte, end-2)
+	copy(str, input[2:])
+	return str, nil
+}
+
+func handleApiVersionsRequest(request *KafkaRequest) ([]byte, error) {
+	var body []byte
+
+	// Add error code
+	if request.apiVersion > apiVersions[API_VERSIONS].maxSupported || request.apiVersion < apiVersions[API_VERSIONS].minSupported {
+		body = binary.BigEndian.AppendUint16(body, INVALID_VERSION_ERR)
+	} else {
+		// 2 byte error code
+		body = append(body, 0x00, 0x00)
+		body = append(body, createApiVersionsBytes()...)
+		// 4 byte throttle time int + tag buffer
+		body = append(body, 0x00, 0x00, 0x00, 0x00, TAG_BUFFER)
+	}
+
+	return body, nil
+}
+
+func handleDescribeTopicPartitionsRequest(request *KafkaRequest) ([]byte, error) {
+	return nil, nil
 }
 
 func createApiVersionsBytes() []byte {
-	// 1 array length byte + 3 * 2byte integers + 1byte tag buffer per api
+	// 1 array length byte + 3 * 2 byte integers + 1 byte tag buffer per api
 	numBytes := 1 + (3*2+1)*len(apiVersions)
 	resp := make([]byte, 0, numBytes)
 	resp = append(resp, byte(len(apiVersions)+1))
