@@ -10,9 +10,8 @@ import (
 	"syscall"
 )
 
-// const MIN_API_VERSION int16 = 0
-// const MAX_API_VERSION int16 = 4
 const INVALID_VERSION_ERR uint16 = 35
+const UNKNOWN_TOPIC_ERR uint16 = 3
 const TAG_BUFFER = 0x00
 
 const API_VERSIONS uint16 = 18
@@ -33,12 +32,12 @@ type ApiVersion struct {
 }
 
 var apiVersions = map[uint16]*ApiVersion{
-	API_VERSIONS: &ApiVersion{
+	API_VERSIONS: {
 		apiKey:       API_VERSIONS,
 		minSupported: 3,
 		maxSupported: 4,
 	},
-	DESCRIBE_TOPIC_PARTITIONS: &ApiVersion{
+	DESCRIBE_TOPIC_PARTITIONS: {
 		apiKey:       DESCRIBE_TOPIC_PARTITIONS,
 		minSupported: 0,
 		maxSupported: 0,
@@ -234,6 +233,7 @@ func handleInput(input []byte) ([]byte, error) {
 
 	// Build response v0 header (just a correlation_id)
 	response := binary.BigEndian.AppendUint32(nil, request.correlationId)
+	response = append(response, TAG_BUFFER)
 
 	// Add response body
 	var body []byte
@@ -264,7 +264,7 @@ func parseInput(input []byte) (*KafkaRequest, error) {
 	// v2 request headers https://kafka.apache.org/protocol.html#protocol_messages
 	// 4 bytes for message_size
 	messageSize := binary.BigEndian.Uint32(input[:4])
-	if int(messageSize) < len(input)-4 {
+	if len(input)-4 < int(messageSize) {
 		return nil, fmt.Errorf("Remaining input length, %v, is shorter than declared message size: %v", len(input), messageSize)
 	}
 	// 2 bytes for request_api_key
@@ -326,7 +326,61 @@ func handleApiVersionsRequest(request *KafkaRequest) ([]byte, error) {
 }
 
 func handleDescribeTopicPartitionsRequest(request *KafkaRequest) ([]byte, error) {
-	return nil, nil
+	// extract request body
+	log.Printf("Received request body: %q", request.body)
+	// topics array: 1 byte for array length
+	arrayLen := int(request.body[0]) - 1
+	var topics [][]byte
+	p := 1
+	for range arrayLen {
+		topicLen := int(request.body[p])
+		p++
+		topicName := make([]byte, topicLen-1)
+		copy(topicName, request.body[p:p+topicLen])
+		// topics = append(topics, request.body[p:p+topicLen])
+		topics = append(topics, topicName)
+		// + 1 for tag buffer
+		p += topicLen + 1
+	}
+
+	log.Printf("Got %v topics from DescribeTopicPartitions request, topics: %s", len(topics), topics)
+
+	// partitionLimit := binary.BigEndian.Uint32(request.body[p : p+4])
+	// p += 4
+	// cursor := request.body[p]
+
+	// now create body from request
+	var body []byte
+	// 4 byte throttle time
+	body = append(body, 0x00, 0x00, 0x00, 0x00)
+	// topics array, first the length
+	body = append(body, byte(arrayLen+1))
+	for i := range topics {
+		// error code, for now always return uknown topic error
+		body = binary.BigEndian.AppendUint16(body, UNKNOWN_TOPIC_ERR)
+		// topic length
+		body = append(body, byte(len(topics[i])+1))
+		// topic name
+		body = append(body, topics[i]...)
+		// topic ID (16-byte UUID) all zeros, indicating null / unassigned UUID
+		topicId := make([]byte, 16)
+		body = append(body, topicId...)
+		// is internal (0 for no)
+		body = append(body, 0x00)
+		// partitions array (just return length 1 for now to indicate an empty array)
+		body = append(body, 0x01)
+		// topic authorized operations, a 4 byte bitfield representing the authorized topics,
+		// see list https://github.com/apache/kafka/blob/1962917436f463541f9bb63791b7ed55c23ce8c1/clients/src/main/java/org/apache/kafka/common/acl/AclOperation.java#L44
+		authorizedOperations := uint32(0b0000_1101_1111_1000)
+		body = binary.BigEndian.AppendUint32(body, authorizedOperations)
+		body = append(body, TAG_BUFFER)
+	}
+	// next cursor (used for pagination, return 0xff null value for now) + tag buffer
+	body = append(body, 0xff, TAG_BUFFER)
+
+	log.Printf("Response body length: %v", len(body))
+
+	return body, nil
 }
 
 func createApiVersionsBytes() []byte {
