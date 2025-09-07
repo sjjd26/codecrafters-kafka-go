@@ -233,7 +233,6 @@ func handleInput(input []byte) ([]byte, error) {
 
 	// Build response v0 header (just a correlation_id)
 	response := binary.BigEndian.AppendUint32(nil, request.correlationId)
-	response = append(response, TAG_BUFFER)
 
 	// Add response body
 	var body []byte
@@ -241,6 +240,8 @@ func handleInput(input []byte) ([]byte, error) {
 	case API_VERSIONS:
 		body, err = handleApiVersionsRequest(request)
 	case DESCRIBE_TOPIC_PARTITIONS:
+		// v1 response header has a tag buffer
+		response = append(response, TAG_BUFFER)
 		body, err = handleDescribeTopicPartitionsRequest(request)
 	default:
 		return nil, fmt.Errorf("Unsupported request api key: %v", request.apiKey)
