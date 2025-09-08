@@ -125,6 +125,8 @@ func extractNullableString(input []byte) ([]byte, error) {
 	return str, nil
 }
 
+// -------------------- API Versions ------------------------
+
 func handleApiVersionsRequest(request *KafkaRequest) ([]byte, error) {
 	var body []byte
 
@@ -141,6 +143,22 @@ func handleApiVersionsRequest(request *KafkaRequest) ([]byte, error) {
 
 	return body, nil
 }
+
+func createApiVersionsBytes() []byte {
+	// 1 array length byte + 3 * 2 byte integers + 1 byte tag buffer per api
+	numBytes := 1 + (3*2+1)*len(apiVersions)
+	resp := make([]byte, 0, numBytes)
+	resp = append(resp, byte(len(apiVersions)+1))
+	for i := range apiVersions {
+		resp = binary.BigEndian.AppendUint16(resp, apiVersions[i].apiKey)
+		resp = binary.BigEndian.AppendUint16(resp, apiVersions[i].minSupported)
+		resp = binary.BigEndian.AppendUint16(resp, apiVersions[i].maxSupported)
+		resp = append(resp, TAG_BUFFER)
+	}
+	return resp
+}
+
+// ---------------- Describe Topic Partitions -----------------
 
 func handleDescribeTopicPartitionsRequest(request *KafkaRequest) ([]byte, error) {
 	// extract request body
@@ -198,18 +216,4 @@ func handleDescribeTopicPartitionsRequest(request *KafkaRequest) ([]byte, error)
 	log.Printf("Response body length: %v", len(body))
 
 	return body, nil
-}
-
-func createApiVersionsBytes() []byte {
-	// 1 array length byte + 3 * 2 byte integers + 1 byte tag buffer per api
-	numBytes := 1 + (3*2+1)*len(apiVersions)
-	resp := make([]byte, 0, numBytes)
-	resp = append(resp, byte(len(apiVersions)+1))
-	for i := range apiVersions {
-		resp = binary.BigEndian.AppendUint16(resp, apiVersions[i].apiKey)
-		resp = binary.BigEndian.AppendUint16(resp, apiVersions[i].minSupported)
-		resp = binary.BigEndian.AppendUint16(resp, apiVersions[i].maxSupported)
-		resp = append(resp, TAG_BUFFER)
-	}
-	return resp
 }
