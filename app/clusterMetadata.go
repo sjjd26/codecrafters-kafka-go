@@ -110,3 +110,13 @@ func extractVarInt(data []byte) (value uint64, consumed int, err error) {
 
 	return 0, consumed, fmt.Errorf("Incomplete varint")
 }
+
+func extractSignedVarInt(data []byte) (value int64, consumed int, err error) {
+	u, consumed, err := extractVarInt(data)
+	if err != nil {
+		return 0, consumed, err
+	}
+	// ZigZag decode
+	value = int64((u >> 1) ^ uint64(-(u & 1)))
+	return
+}
