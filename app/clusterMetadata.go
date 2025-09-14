@@ -70,16 +70,20 @@ type PartitionRecord struct {
 	directories      [][16]byte
 }
 
-func retrieveClusterMetadata() (*MetadataRecordBatch, error) {
+func retrieveClusterMetadata() ([]*MetadataRecordBatch, error) {
 	file, err := os.Open(CLUSTER_METADATA_PATH)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	return nil, nil
+	batches, err := parseClusterMetadataFile(*file)
+	if err != nil {
+		return nil, err
+	}
+	return batches, nil
 }
 
-func ParseClusterMetadataFile(file os.File) ([]*MetadataRecordBatch, error) {
+func parseClusterMetadataFile(file os.File) ([]*MetadataRecordBatch, error) {
 	readBuf := make([]byte, 1024)
 	n, err := file.Read(readBuf)
 	if err != nil {
@@ -330,7 +334,7 @@ func parsePartitionRecord(data []byte, base *RecordBase) (*PartitionRecord, int,
 		return nil, p, err
 	}
 	directories := make([][16]byte, 0, numDirectories)
-	for _ = range numDirectories {
+	for range numDirectories {
 		var dirID [16]byte
 		copy(dirID[:], data[p:p+16])
 		p += 16
@@ -380,7 +384,7 @@ func extractReplicaList(data []byte) ([]int32, int, error) {
 		return nil, p, fmt.Errorf("Failed to extract replica list: %w", err)
 	}
 	replicas := make([]int32, 0, numReplicas)
-	for _ = range numReplicas {
+	for range numReplicas {
 		replica := int32(binary.BigEndian.Uint32(data[p : p+4]))
 		p += 4
 		replicas = append(replicas, replica)
