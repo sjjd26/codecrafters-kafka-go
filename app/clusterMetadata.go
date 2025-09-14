@@ -41,6 +41,7 @@ type RecordBase struct {
 	frameVersion   int8
 	recordType     RecordType
 	version        int8
+	taggedFields   []byte
 }
 
 type FeatureLevelRecord struct {
@@ -78,7 +79,7 @@ func retrieveClusterMetadata() (*MetadataRecordBatch, error) {
 	return nil, nil
 }
 
-func parseClusterMetadataFile(file os.File) ([]*MetadataRecordBatch, error) {
+func ParseClusterMetadataFile(file os.File) ([]*MetadataRecordBatch, error) {
 	readBuf := make([]byte, 1024)
 	n, err := file.Read(readBuf)
 	if err != nil {
@@ -224,6 +225,10 @@ func parseMetadataRecord(data []byte) (any, int, error) {
 	switch recordType {
 	case RECORD_TYPE_FEATURE_LEVEL:
 		record, _, err = parseFeatureLevelRecord(data[p:], base)
+	case RECORD_TYPE_TOPIC:
+		record, _, err = parseTopicRecord(data[p:], base)
+	case RECORD_TYPE_PARTITION:
+		record, _, err = parsePartitionRecord(data[p:], base)
 	default:
 		return nil, recordLength, fmt.Errorf("Record type not supported")
 	}
@@ -242,14 +247,12 @@ func parseFeatureLevelRecord(data []byte, base *RecordBase) (*FeatureLevelRecord
 	featureLevel := binary.BigEndian.Uint16(data[p : p+2])
 	p += 2
 
-	taggedFieldsCount, p, err := extractVarInt(data[p:])
+	taggedFields, n, err := extractTaggedFields(data[p:])
 	p += n
 	if err != nil {
 		return nil, p, err
 	}
-	if taggedFieldsCount > 0 {
-		return nil, p, fmt.Errorf("Tagged fields not supported yet")
-	}
+	base.taggedFields = taggedFields
 
 	featureLevelRecord := &FeatureLevelRecord{
 		RecordBase:   *base,
@@ -257,6 +260,132 @@ func parseFeatureLevelRecord(data []byte, base *RecordBase) (*FeatureLevelRecord
 		featureLevel: featureLevel,
 	}
 	return featureLevelRecord, p, nil
+}
+
+func parseTopicRecord(data []byte, base *RecordBase) (*TopicRecord, int, error) {
+	p := 0
+	nameLength, n, err := extractVarInt(data[p:])
+	p += n
+	if err != nil {
+		return nil, p, err
+	}
+	name := data[p : p+int(nameLength)]
+	p += int(nameLength)
+	var topicID [16]byte
+	copy(topicID[:], data[p:p+16])
+	p += 16
+
+	taggedFields, n, err := extractTaggedFields(data[p:])
+	p += n
+	if err != nil {
+		return nil, p, err
+	}
+	base.taggedFields = taggedFields
+
+	record := &TopicRecord{
+		RecordBase: *base,
+		name:       name,
+		topicID:    topicID,
+	}
+	return record, p, nil
+}
+
+func parsePartitionRecord(data []byte, base *RecordBase) (*PartitionRecord, int, error) {
+	p := 0
+	partitionID := int32(binary.BigEndian.Uint32(data[p : p+4]))
+	p += 4
+	var topicID [16]byte
+	copy(topicID[:], data[p:p+16])
+	p += 16
+	// replicas
+	replicas, n, err := extractReplicaList(data[p:])
+	p += n
+	if err != nil {
+		return nil, p, err
+	}
+	inSyncReplicas, n, err := extractReplicaList(data[p:])
+	p += n
+	if err != nil {
+		return nil, p, err
+	}
+	removingReplicas, n, err := extractReplicaList(data[p:])
+	p += n
+	if err != nil {
+		return nil, p, err
+	}
+	addingReplicas, n, err := extractReplicaList(data[p:])
+	p += n
+	if err != nil {
+		return nil, p, err
+	}
+	leaderReplica := int32(binary.BigEndian.Uint32(data[p : p+4]))
+	p += 4
+	leaderEpoch := int32(binary.BigEndian.Uint32(data[p : p+4]))
+	p += 4
+	partitionEpoch := int32(binary.BigEndian.Uint32(data[p : p+4]))
+	p += 4
+	numDirectories, n, err := extractVarInt(data[p:])
+	p += n
+	if err != nil {
+		return nil, p, err
+	}
+	directories := make([][16]byte, 0, numDirectories)
+	for _ = range numDirectories {
+		var dirID [16]byte
+		copy(dirID[:], data[p:p+16])
+		p += 16
+		directories = append(directories, dirID)
+	}
+	taggedFields, n, err := extractTaggedFields(data[p:])
+	p += n
+	if err != nil {
+		return nil, p, err
+	}
+	base.taggedFields = taggedFields
+
+	partitionRecord := &PartitionRecord{
+		RecordBase:       *base,
+		partitionID:      partitionID,
+		topicID:          topicID,
+		replicas:         replicas,
+		inSyncReplicas:   inSyncReplicas,
+		removingReplicas: removingReplicas,
+		addingReplicas:   addingReplicas,
+		leaderReplica:    leaderReplica,
+		leaderEpoch:      leaderEpoch,
+		partitionEpoch:   partitionEpoch,
+		directories:      directories,
+	}
+	return partitionRecord, p, nil
+}
+
+func extractTaggedFields(data []byte) ([]byte, int, error) {
+	p := 0
+	numTaggedFields, n, err := extractVarInt(data[p:])
+	p += n
+	if err != nil {
+		return nil, p, fmt.Errorf("Failed to extract tagged fields: %w", err)
+	}
+	if numTaggedFields > 0 {
+		return nil, p, fmt.Errorf("Tagged fields not supported yet")
+	}
+	return nil, p, nil
+}
+
+func extractReplicaList(data []byte) ([]int32, int, error) {
+	p := 0
+	numReplicas, n, err := extractVarInt(data[p:])
+	p += n
+	if err != nil {
+		return nil, p, fmt.Errorf("Failed to extract replica list: %w", err)
+	}
+	replicas := make([]int32, 0, numReplicas)
+	for _ = range numReplicas {
+		replica := int32(binary.BigEndian.Uint32(data[p : p+4]))
+		p += 4
+		replicas = append(replicas, replica)
+	}
+	return replicas, p, nil
 }
 
 func extractVarInt(data []byte) (value uint64, consumed int, err error) {
