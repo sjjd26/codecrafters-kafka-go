@@ -9,6 +9,7 @@ import (
 
 const CLUSTER_METADATA_PATH = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log"
 
+type uuid [16]byte
 type RecordType int8
 
 const (
@@ -18,11 +19,12 @@ const (
 	RECORD_TYPE_FEATURE_LEVEL RecordType = 12
 )
 
-type TopicMap map[[16]byte]*Topic
+type TopicsByName map[string]*Topic
+type TopicsById map[uuid]*Topic
 
 type Topic struct {
-	name                 []byte
-	id                   [16]byte
+	name                 string
+	id                   uuid
 	isInternal           bool
 	partitions           []*TopicPartition
 	authorizedOperations int32
@@ -30,7 +32,7 @@ type Topic struct {
 
 type TopicPartition struct {
 	errorCode                int16
-	partitionIndex           int32
+	index                    int32
 	leaderId                 int32
 	leaderEpoch              int32
 	replicas                 []int32
@@ -68,20 +70,20 @@ type RecordBase struct {
 
 type FeatureLevelRecord struct {
 	RecordBase
-	name         []byte
+	name         string
 	featureLevel uint16
 }
 
 type TopicRecord struct {
 	RecordBase
-	name    []byte
-	topicId [16]byte
+	name    string
+	topicId uuid
 }
 
 type PartitionRecord struct {
 	RecordBase
 	partitionId      int32
-	topicId          [16]byte
+	topicId          uuid
 	replicas         []int32
 	inSyncReplicas   []int32
 	removingReplicas []int32
@@ -89,7 +91,7 @@ type PartitionRecord struct {
 	leaderReplica    int32
 	leaderEpoch      int32
 	partitionEpoch   int32
-	directories      [][16]byte
+	directories      []uuid
 }
 
 func retrieveClusterMetadata() ([]*MetadataRecordBatch, error) {
@@ -268,7 +270,7 @@ func parseFeatureLevelRecord(data []byte, base *RecordBase) (*FeatureLevelRecord
 	if err != nil {
 		return nil, p, err
 	}
-	name := data[p : p+int(nameLength)]
+	name := string(data[p : p+int(nameLength)])
 	p += int(nameLength)
 	featureLevel := binary.BigEndian.Uint16(data[p : p+2])
 	p += 2
@@ -295,9 +297,9 @@ func parseTopicRecord(data []byte, base *RecordBase) (*TopicRecord, int, error) 
 	if err != nil {
 		return nil, p, err
 	}
-	name := data[p : p+int(nameLength)]
+	name := string(data[p : p+int(nameLength)])
 	p += int(nameLength)
-	var topicId [16]byte
+	var topicId uuid
 	copy(topicId[:], data[p:p+16])
 	p += 16
 
@@ -320,7 +322,7 @@ func parsePartitionRecord(data []byte, base *RecordBase) (*PartitionRecord, int,
 	p := 0
 	partitionId := int32(binary.BigEndian.Uint32(data[p : p+4]))
 	p += 4
-	var topicId [16]byte
+	var topicId uuid
 	copy(topicId[:], data[p:p+16])
 	p += 16
 	// replicas
@@ -355,9 +357,9 @@ func parsePartitionRecord(data []byte, base *RecordBase) (*PartitionRecord, int,
 	if err != nil {
 		return nil, p, err
 	}
-	directories := make([][16]byte, 0, numDirectories)
+	directories := make([]uuid, 0, numDirectories)
 	for range numDirectories {
-		var dirID [16]byte
+		var dirID uuid
 		copy(dirID[:], data[p:p+16])
 		p += 16
 		directories = append(directories, dirID)
@@ -452,25 +454,25 @@ func extractSignedVarInt(data []byte) (value int64, consumed int, err error) {
 	return
 }
 
-func produceTopicMap() (TopicMap, error) {
+func produceTopicMap() (TopicsByName, error) {
 	batches, err := retrieveClusterMetadata()
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving cluster metadata: %w", err)
 	}
 
-	topics := make(map[[16]byte]*Topic)
+	topicIdMap := make(TopicsById)
 	for _, batch := range batches {
 		for _, record := range batch.records {
 			switch r := record.(type) {
 			case *TopicRecord:
-				topic, exists := topics[r.topicId]
+				topic, exists := topicIdMap[r.topicId]
 				if exists {
-					if topic.name != nil {
+					if topic.name != "" {
 						return nil, fmt.Errorf("duplicate topic ID found in metadata: %x", r.topicId)
 					}
 					topic.name = r.name
 				} else {
-					topics[r.topicId] = &Topic{
+					topicIdMap[r.topicId] = &Topic{
 						name:       r.name,
 						id:         r.topicId,
 						isInternal: false,
@@ -478,16 +480,16 @@ func produceTopicMap() (TopicMap, error) {
 				}
 
 			case *PartitionRecord:
-				topic, exists := topics[r.topicId]
+				topic, exists := topicIdMap[r.topicId]
 				if !exists {
 					topic = &Topic{
 						id: r.topicId,
 					}
-					topics[r.topicId] = topic
+					topicIdMap[r.topicId] = topic
 				}
 				topic.partitions = append(topic.partitions, &TopicPartition{
 					errorCode:                0,
-					partitionIndex:           r.partitionId,
+					index:                    r.partitionId,
 					leaderId:                 r.leaderReplica,
 					leaderEpoch:              r.leaderEpoch,
 					replicas:                 r.replicas,
@@ -504,5 +506,16 @@ func produceTopicMap() (TopicMap, error) {
 		}
 	}
 
-	return topics, nil
+	topicNameMap := make(TopicsByName)
+	for _, topic := range topicIdMap {
+		if topic.name == "" {
+			return nil, fmt.Errorf("topic with ID %x has no name", topic.id)
+		}
+		if _, exists := topicNameMap[topic.name]; exists {
+			return nil, fmt.Errorf("duplicate topic name found in metadata: %s", topic.name)
+		}
+		topicNameMap[topic.name] = topic
+	}
+
+	return topicNameMap, nil
 }
