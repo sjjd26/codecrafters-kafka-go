@@ -34,12 +34,14 @@ func main() {
 	}
 	log.Printf("Added listener %v to epoll %v", int(listenerFd), epollFd)
 
-	topics, err := produceTopicMap()
+	topicsByName, err := produceTopicMap()
 	if err != nil {
 		log.Fatalf("Failed to produce topic map: %s", err)
 	}
+	log.Println("Loaded topic map")
+
 	kContext := &KafkaContext{
-		topicMap: topics,
+		topicsByName: topicsByName,
 	}
 
 	eventLoop(epollFd, int(listenerFd), kContext)

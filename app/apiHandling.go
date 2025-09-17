@@ -14,7 +14,7 @@ const API_VERSIONS uint16 = 18
 const DESCRIBE_TOPIC_PARTITIONS uint16 = 75
 
 type KafkaContext struct {
-	topicMap TopicMap
+	topicsByName TopicsByName
 }
 
 type KafkaRequest struct {
@@ -62,7 +62,7 @@ func handleInput(input []byte, kContext *KafkaContext) ([]byte, error) {
 	case DESCRIBE_TOPIC_PARTITIONS:
 		// v1 response header has a tag buffer
 		response = append(response, TAG_BUFFER)
-		body, err = handleDescribeTopicPartitionsRequest(request, kContext.topicMap)
+		body, err = handleDescribeTopicPartitionsRequest(request, kContext.topicsByName)
 	default:
 		return nil, fmt.Errorf("Unsupported request api key: %v", request.apiKey)
 	}
@@ -164,12 +164,12 @@ func createApiVersionsBytes() []byte {
 
 // ---------------- Describe Topic Partitions -----------------
 
-func handleDescribeTopicPartitionsRequest(request *KafkaRequest, topicMap TopicMap) ([]byte, error) {
+func handleDescribeTopicPartitionsRequest(request *KafkaRequest, topicsByName TopicsByName) ([]byte, error) {
 	// extract request body
 	log.Printf("Received request body: %q", request.body)
 	// topics array: 1 byte for array length
 	arrayLen := int(request.body[0]) - 1
-	var topics [][]byte
+	var topicNames [][]byte
 	p := 1
 	for range arrayLen {
 		topicLen := int(request.body[p])
@@ -177,12 +177,12 @@ func handleDescribeTopicPartitionsRequest(request *KafkaRequest, topicMap TopicM
 		topicName := make([]byte, topicLen-1)
 		copy(topicName, request.body[p:p+topicLen])
 		// topics = append(topics, request.body[p:p+topicLen])
-		topics = append(topics, topicName)
+		topicNames = append(topicNames, topicName)
 		// + 1 for tag buffer
 		p += topicLen + 1
 	}
 
-	log.Printf("Got %v topics from DescribeTopicPartitions request, topics: %s", len(topics), topics)
+	log.Printf("Got %v topics from DescribeTopicPartitions request, topics: %s", len(topicNames), topicNames)
 
 	// partitionLimit := binary.BigEndian.Uint32(request.body[p : p+4])
 	// p += 4
@@ -194,8 +194,13 @@ func handleDescribeTopicPartitionsRequest(request *KafkaRequest, topicMap TopicM
 	body = append(body, 0x00, 0x00, 0x00, 0x00)
 	// topics array, first the length
 	body = append(body, byte(arrayLen+1))
-	for i := range topics {
-		body = append(body, unknownTopicResponse(topics[i])...)
+	for _, topicName := range topicNames {
+		topic, exists := topicsByName[string(topicName)]
+		if !exists {
+			body = append(body, unknownTopicResponse(topicName)...)
+		} else {
+			body = append(body, topicResponse(topic)...)
+		}
 	}
 	// next cursor (used for pagination, return 0xff null value for now) + tag buffer
 	body = append(body, 0xff, TAG_BUFFER)
@@ -209,7 +214,7 @@ func unknownTopicResponse(topicName []byte) []byte {
 	respLength := 2 + 1 + len(topicName) + 16 + 1 + 1 + 4 + 1
 	resp := make([]byte, 0, respLength)
 	resp = binary.BigEndian.AppendUint16(resp, UNKNOWN_TOPIC_ERR)
-	// topic length
+	// topic name length
 	resp = appendVarint(resp, int64(len(topicName)+1))
 	// topic name
 	resp = append(resp, topicName...)
@@ -225,5 +230,67 @@ func unknownTopicResponse(topicName []byte) []byte {
 	authorizedOperations := uint32(0x0d_f8)
 	resp = binary.BigEndian.AppendUint32(resp, authorizedOperations)
 	resp = append(resp, TAG_BUFFER)
+	return resp
+}
+
+func topicResponse(topic *Topic) []byte {
+	respLength := 2 + 1 + len(topic.name) + 16 + 1 + 1 + 4 + 1
+	resp := make([]byte, 0, respLength)
+	// 2 byte error code
+	resp = binary.BigEndian.AppendUint16(resp, 0x00)
+	// topic name length
+	resp = appendVarint(resp, int64(len(topic.name)+1))
+	// topic name
+	resp = append(resp, topic.name...)
+	// topic ID (16-byte UUID)
+	resp = append(resp, topic.id[:]...)
+	// is internal (0 for no)
+	if topic.isInternal {
+		resp = append(resp, 0x01)
+	} else {
+		resp = append(resp, 0x00)
+	}
+	// partitions array, first the length
+	resp = append(resp, byte(len(topic.partitions)+1))
+	for _, partition := range topic.partitions {
+		// 2 byte error code
+		resp = binary.BigEndian.AppendUint16(resp, uint16(partition.errorCode))
+		// 4 byte partition index
+		resp = binary.BigEndian.AppendUint32(resp, uint32(partition.index))
+		// 4 byte leader ID
+		resp = binary.BigEndian.AppendUint32(resp, uint32(partition.leaderId))
+		// 4 byte leader epoch
+		resp = binary.BigEndian.AppendUint32(resp, uint32(partition.leaderEpoch))
+		// 4 byte array of 4 byte replica broker IDs
+		resp = binary.BigEndian.AppendUint32(resp, uint32(len(partition.replicas)))
+		for _, replica := range partition.replicas {
+			resp = binary.BigEndian.AppendUint32(resp, uint32(replica))
+		}
+		// 4 byte array of 4 byte in-sync replica broker IDs
+		resp = binary.BigEndian.AppendUint32(resp, uint32(len(partition.inSyncReplicas)))
+		for _, isr := range partition.inSyncReplicas {
+			resp = binary.BigEndian.AppendUint32(resp, uint32(isr))
+		}
+		// eligible leaders array
+		resp = binary.BigEndian.AppendUint32(resp, uint32(len(partition.eligibleLeaderReplicas)))
+		for _, elr := range partition.eligibleLeaderReplicas {
+			resp = binary.BigEndian.AppendUint32(resp, uint32(elr))
+		}
+		// last known eligible leaders array
+		resp = binary.BigEndian.AppendUint32(resp, uint32(len(partition.lastKnownEligibleLeaders)))
+		for _, lk := range partition.lastKnownEligibleLeaders {
+			resp = binary.BigEndian.AppendUint32(resp, uint32(lk))
+		}
+		// offline replica IDs array
+		resp = binary.BigEndian.AppendUint32(resp, uint32(len(partition.offlineReplicas)))
+		for _, or := range partition.offlineReplicas {
+			resp = binary.BigEndian.AppendUint32(resp, uint32(or))
+		}
+		resp = append(resp, TAG_BUFFER)
+	}
+	// topic authorized operations, a 4 byte bitfield representing the authorized topics
+	resp = binary.BigEndian.AppendUint32(resp, uint32(topic.authorizedOperations))
+	resp = append(resp, TAG_BUFFER)
+
 	return resp
 }
