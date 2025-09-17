@@ -13,6 +13,10 @@ const TAG_BUFFER = 0x00
 const API_VERSIONS uint16 = 18
 const DESCRIBE_TOPIC_PARTITIONS uint16 = 75
 
+type KafkaContext struct {
+	metadataBatches []*MetadataRecordBatch
+}
+
 type KafkaRequest struct {
 	apiKey        uint16
 	apiVersion    uint16
@@ -40,7 +44,7 @@ var apiVersions = map[uint16]*ApiVersion{
 	},
 }
 
-func handleInput(input []byte) ([]byte, error) {
+func handleInput(input []byte, kContext *KafkaContext) ([]byte, error) {
 	var request *KafkaRequest
 	request, err := parseInput(input)
 	if err != nil {
@@ -58,7 +62,7 @@ func handleInput(input []byte) ([]byte, error) {
 	case DESCRIBE_TOPIC_PARTITIONS:
 		// v1 response header has a tag buffer
 		response = append(response, TAG_BUFFER)
-		body, err = handleDescribeTopicPartitionsRequest(request)
+		body, err = handleDescribeTopicPartitionsRequest(request, kContext.metadataBatches)
 	default:
 		return nil, fmt.Errorf("Unsupported request api key: %v", request.apiKey)
 	}
@@ -160,7 +164,7 @@ func createApiVersionsBytes() []byte {
 
 // ---------------- Describe Topic Partitions -----------------
 
-func handleDescribeTopicPartitionsRequest(request *KafkaRequest) ([]byte, error) {
+func handleDescribeTopicPartitionsRequest(request *KafkaRequest, metadataBatches []*MetadataRecordBatch) ([]byte, error) {
 	// extract request body
 	log.Printf("Received request body: %q", request.body)
 	// topics array: 1 byte for array length
@@ -191,24 +195,7 @@ func handleDescribeTopicPartitionsRequest(request *KafkaRequest) ([]byte, error)
 	// topics array, first the length
 	body = append(body, byte(arrayLen+1))
 	for i := range topics {
-		// error code, for now always return uknown topic error
-		body = binary.BigEndian.AppendUint16(body, UNKNOWN_TOPIC_ERR)
-		// topic length
-		body = append(body, byte(len(topics[i])+1))
-		// topic name
-		body = append(body, topics[i]...)
-		// topic ID (16-byte UUID) all zeros, indicating null / unassigned UUID
-		topicId := make([]byte, 16)
-		body = append(body, topicId...)
-		// is internal (0 for no)
-		body = append(body, 0x00)
-		// partitions array (just return length 1 for now to indicate an empty array)
-		body = append(body, 0x01)
-		// topic authorized operations, a 4 byte bitfield representing the authorized topics,
-		// see list https://github.com/apache/kafka/blob/1962917436f463541f9bb63791b7ed55c23ce8c1/clients/src/main/java/org/apache/kafka/common/acl/AclOperation.java#L44
-		authorizedOperations := uint32(0b0000_1101_1111_1000)
-		body = binary.BigEndian.AppendUint32(body, authorizedOperations)
-		body = append(body, TAG_BUFFER)
+		body = append(body, unknownTopicResponse(topics[i])...)
 	}
 	// next cursor (used for pagination, return 0xff null value for now) + tag buffer
 	body = append(body, 0xff, TAG_BUFFER)
@@ -216,4 +203,39 @@ func handleDescribeTopicPartitionsRequest(request *KafkaRequest) ([]byte, error)
 	log.Printf("Response body length: %v", len(body))
 
 	return body, nil
+}
+
+func unknownTopicResponse(topicName []byte) []byte {
+	respLength := 2 + 1 + len(topicName) + 16 + 1 + 1 + 4 + 1
+	resp := make([]byte, 0, respLength)
+	resp = binary.BigEndian.AppendUint16(resp, UNKNOWN_TOPIC_ERR)
+	// topic length
+	resp = appendVarint(resp, int64(len(topicName)+1))
+	// topic name
+	resp = append(resp, topicName...)
+	// topic ID (16-byte UUID) all zeros, indicating null / unassigned UUID
+	topicId := make([]byte, 16)
+	resp = append(resp, topicId...)
+	// is internal (0 for no)
+	resp = append(resp, 0x00)
+	// partitions array (just return length 1 for now to indicate an empty array)
+	resp = append(resp, 0x01)
+	// topic authorized operations, a 4 byte bitfield representing the authorized topics,
+	// see list https://github.com/apache/kafka/blob/1962917436f463541f9bb63791b7ed55c23ce8c1/clients/src/main/java/org/apache/kafka/common/acl/AclOperation.java#L44
+	authorizedOperations := uint32(0x0d_f8)
+	resp = binary.BigEndian.AppendUint32(resp, authorizedOperations)
+	resp = append(resp, TAG_BUFFER)
+	return resp
+}
+
+func appendVarint(slice []byte, value int64) []byte {
+	var buf [10]byte
+	n := binary.PutVarint(buf[:], value)
+	return append(slice, buf[:n]...)
+}
+
+func appendUVarint(slice []byte, value uint64) []byte {
+	var buf [10]byte
+	n := binary.PutUvarint(buf[:], value)
+	return append(slice, buf[:n]...)
 }

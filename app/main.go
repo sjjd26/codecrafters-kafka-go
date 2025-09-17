@@ -32,10 +32,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to add listener to epoll: %s", err)
 	}
-
 	log.Printf("Added listener %v to epoll %v", int(listenerFd), epollFd)
 
-	eventLoop(epollFd, int(listenerFd))
+	metadataBatches, err := retrieveClusterMetadata()
+	kContext := &KafkaContext{
+		metadataBatches: metadataBatches,
+	}
+
+	eventLoop(epollFd, int(listenerFd), kContext)
 }
 
 func createNonBlockingListener(addr string) (*os.File, error) {
@@ -89,7 +93,7 @@ func removeAndCloseFd(epollFd int, fd int) error {
 	return nil
 }
 
-func eventLoop(epollFd int, listenerFd int) {
+func eventLoop(epollFd int, listenerFd int, kContext *KafkaContext) {
 	defer syscall.Close(epollFd)
 	events := make([]syscall.EpollEvent, 10)
 	timeoutMs := -1 // negative timeout -> indefinite
@@ -142,7 +146,7 @@ func eventLoop(epollFd int, listenerFd int) {
 						log.Fatalln(err)
 					}
 				}
-				err = handleClient(fd)
+				err = handleClient(fd, kContext)
 				if err != nil {
 					log.Printf("Error handling client %v: %s", fd, err)
 				}
@@ -166,7 +170,7 @@ func acceptNewConnection(listenerFd int) (int, error) {
 	return connFd, nil
 }
 
-func handleClient(clientFd int) error {
+func handleClient(clientFd int, kContext *KafkaContext) error {
 	log.Printf("Received input from client connection %v", clientFd)
 	readBuf := make([]byte, 1024)
 	_, err := syscall.Read(clientFd, readBuf)
@@ -177,7 +181,7 @@ func handleClient(clientFd int) error {
 
 	// for now just assume the input is always one command and valid
 	// no detailed parsing
-	response, err := handleInput(readBuf)
+	response, err := handleInput(readBuf, kContext)
 	if err != nil {
 		return fmt.Errorf("Error handling input: %w", err)
 	}
