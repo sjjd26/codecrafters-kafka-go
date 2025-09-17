@@ -18,6 +18,28 @@ const (
 	RECORD_TYPE_FEATURE_LEVEL RecordType = 12
 )
 
+type TopicMap map[[16]byte]*Topic
+
+type Topic struct {
+	name                 []byte
+	id                   [16]byte
+	isInternal           bool
+	partitions           []*TopicPartition
+	authorizedOperations int32
+}
+
+type TopicPartition struct {
+	errorCode                int16
+	partitionIndex           int32
+	leaderId                 int32
+	leaderEpoch              int32
+	replicas                 []int32
+	inSyncReplicas           []int32
+	eligibleLeaderReplicas   []int32
+	lastKnownEligibleLeaders []int32
+	offlineReplicas          []int32
+}
+
 type MetadataRecordBatch struct {
 	baseOffset           uint64
 	partitionLeaderEpoch uint32
@@ -53,13 +75,13 @@ type FeatureLevelRecord struct {
 type TopicRecord struct {
 	RecordBase
 	name    []byte
-	topicID [16]byte
+	topicId [16]byte
 }
 
 type PartitionRecord struct {
 	RecordBase
-	partitionID      int32
-	topicID          [16]byte
+	partitionId      int32
+	topicId          [16]byte
 	replicas         []int32
 	inSyncReplicas   []int32
 	removingReplicas []int32
@@ -275,8 +297,8 @@ func parseTopicRecord(data []byte, base *RecordBase) (*TopicRecord, int, error) 
 	}
 	name := data[p : p+int(nameLength)]
 	p += int(nameLength)
-	var topicID [16]byte
-	copy(topicID[:], data[p:p+16])
+	var topicId [16]byte
+	copy(topicId[:], data[p:p+16])
 	p += 16
 
 	taggedFields, n, err := extractTaggedFields(data[p:])
@@ -289,17 +311,17 @@ func parseTopicRecord(data []byte, base *RecordBase) (*TopicRecord, int, error) 
 	record := &TopicRecord{
 		RecordBase: *base,
 		name:       name,
-		topicID:    topicID,
+		topicId:    topicId,
 	}
 	return record, p, nil
 }
 
 func parsePartitionRecord(data []byte, base *RecordBase) (*PartitionRecord, int, error) {
 	p := 0
-	partitionID := int32(binary.BigEndian.Uint32(data[p : p+4]))
+	partitionId := int32(binary.BigEndian.Uint32(data[p : p+4]))
 	p += 4
-	var topicID [16]byte
-	copy(topicID[:], data[p:p+16])
+	var topicId [16]byte
+	copy(topicId[:], data[p:p+16])
 	p += 16
 	// replicas
 	replicas, n, err := extractReplicaList(data[p:])
@@ -349,8 +371,8 @@ func parsePartitionRecord(data []byte, base *RecordBase) (*PartitionRecord, int,
 
 	partitionRecord := &PartitionRecord{
 		RecordBase:       *base,
-		partitionID:      partitionID,
-		topicID:          topicID,
+		partitionId:      partitionId,
+		topicId:          topicId,
 		replicas:         replicas,
 		inSyncReplicas:   inSyncReplicas,
 		removingReplicas: removingReplicas,
@@ -428,4 +450,59 @@ func extractSignedVarInt(data []byte) (value int64, consumed int, err error) {
 	// ZigZag decode
 	value = int64((u >> 1) ^ uint64(-(u & 1)))
 	return
+}
+
+func produceTopicMap() (TopicMap, error) {
+	batches, err := retrieveClusterMetadata()
+	if err != nil {
+		return nil, fmt.Errorf("error retrieving cluster metadata: %w", err)
+	}
+
+	topics := make(map[[16]byte]*Topic)
+	for _, batch := range batches {
+		for _, record := range batch.records {
+			switch r := record.(type) {
+			case *TopicRecord:
+				topic, exists := topics[r.topicId]
+				if exists {
+					if topic.name != nil {
+						return nil, fmt.Errorf("duplicate topic ID found in metadata: %x", r.topicId)
+					}
+					topic.name = r.name
+				} else {
+					topics[r.topicId] = &Topic{
+						name:       r.name,
+						id:         r.topicId,
+						isInternal: false,
+					}
+				}
+
+			case *PartitionRecord:
+				topic, exists := topics[r.topicId]
+				if !exists {
+					topic = &Topic{
+						id: r.topicId,
+					}
+					topics[r.topicId] = topic
+				}
+				topic.partitions = append(topic.partitions, &TopicPartition{
+					errorCode:                0,
+					partitionIndex:           r.partitionId,
+					leaderId:                 r.leaderReplica,
+					leaderEpoch:              r.leaderEpoch,
+					replicas:                 r.replicas,
+					inSyncReplicas:           r.inSyncReplicas,
+					eligibleLeaderReplicas:   nil,
+					lastKnownEligibleLeaders: nil,
+					offlineReplicas:          nil, // TODO: fix
+				})
+			case *FeatureLevelRecord:
+				// ignore for now
+			default:
+				return nil, fmt.Errorf("unknown record type in metadata batch: %T", r)
+			}
+		}
+	}
+
+	return topics, nil
 }

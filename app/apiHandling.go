@@ -14,7 +14,7 @@ const API_VERSIONS uint16 = 18
 const DESCRIBE_TOPIC_PARTITIONS uint16 = 75
 
 type KafkaContext struct {
-	metadataBatches []*MetadataRecordBatch
+	topicMap TopicMap
 }
 
 type KafkaRequest struct {
@@ -62,7 +62,7 @@ func handleInput(input []byte, kContext *KafkaContext) ([]byte, error) {
 	case DESCRIBE_TOPIC_PARTITIONS:
 		// v1 response header has a tag buffer
 		response = append(response, TAG_BUFFER)
-		body, err = handleDescribeTopicPartitionsRequest(request, kContext.metadataBatches)
+		body, err = handleDescribeTopicPartitionsRequest(request, kContext.topicMap)
 	default:
 		return nil, fmt.Errorf("Unsupported request api key: %v", request.apiKey)
 	}
@@ -164,7 +164,7 @@ func createApiVersionsBytes() []byte {
 
 // ---------------- Describe Topic Partitions -----------------
 
-func handleDescribeTopicPartitionsRequest(request *KafkaRequest, metadataBatches []*MetadataRecordBatch) ([]byte, error) {
+func handleDescribeTopicPartitionsRequest(request *KafkaRequest, topicMap TopicMap) ([]byte, error) {
 	// extract request body
 	log.Printf("Received request body: %q", request.body)
 	// topics array: 1 byte for array length
@@ -226,16 +226,4 @@ func unknownTopicResponse(topicName []byte) []byte {
 	resp = binary.BigEndian.AppendUint32(resp, authorizedOperations)
 	resp = append(resp, TAG_BUFFER)
 	return resp
-}
-
-func appendVarint(slice []byte, value int64) []byte {
-	var buf [10]byte
-	n := binary.PutVarint(buf[:], value)
-	return append(slice, buf[:n]...)
-}
-
-func appendUVarint(slice []byte, value uint64) []byte {
-	var buf [10]byte
-	n := binary.PutUvarint(buf[:], value)
-	return append(slice, buf[:n]...)
 }

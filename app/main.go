@@ -34,9 +34,12 @@ func main() {
 	}
 	log.Printf("Added listener %v to epoll %v", int(listenerFd), epollFd)
 
-	metadataBatches, err := retrieveClusterMetadata()
+	topics, err := produceTopicMap()
+	if err != nil {
+		log.Fatalf("Failed to produce topic map: %s", err)
+	}
 	kContext := &KafkaContext{
-		metadataBatches: metadataBatches,
+		topicMap: topics,
 	}
 
 	eventLoop(epollFd, int(listenerFd), kContext)
