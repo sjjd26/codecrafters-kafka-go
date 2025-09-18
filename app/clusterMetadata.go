@@ -111,7 +111,7 @@ func parseClusterMetadataFile(file os.File) ([]*MetadataRecordBatch, error) {
 	readBuf := make([]byte, 1024)
 	n, err := file.Read(readBuf)
 	if err != nil {
-		return nil, fmt.Errorf("Error reading metadata file: %w", err)
+		return nil, fmt.Errorf("error reading metadata file: %w", err)
 	}
 
 	var batches []*MetadataRecordBatch
@@ -119,7 +119,7 @@ func parseClusterMetadataFile(file os.File) ([]*MetadataRecordBatch, error) {
 	for p < n {
 		batch, n, err := parseMetadataRecordBatch(readBuf[p:])
 		if err != nil {
-			return nil, fmt.Errorf("Error parsing metadata record batch: %w", err)
+			return nil, fmt.Errorf("error parsing metadata record batch: %w", err)
 		}
 		p += n
 		batches = append(batches, batch)
@@ -130,14 +130,14 @@ func parseClusterMetadataFile(file os.File) ([]*MetadataRecordBatch, error) {
 
 func parseMetadataRecordBatch(data []byte) (*MetadataRecordBatch, int, error) {
 	if len(data) < 12 {
-		return nil, len(data), fmt.Errorf("Not enough bytes to parse metadata record batch, need 12 got %d", len(data))
+		return nil, len(data), fmt.Errorf("not enough bytes to parse metadata record batch, need 12 got %d", len(data))
 	}
 	p := 0
 	baseOffset := binary.BigEndian.Uint64(data[p : p+8])
 	p += 8
 	batchLength := int(binary.BigEndian.Uint32(data[p:p+4])) + 12
 	if batchLength > len(data) {
-		return nil, len(data), fmt.Errorf("Declared metadata batch length %d is bigger than data length %d", batchLength, len(data))
+		return nil, len(data), fmt.Errorf("declared metadata batch length %d is bigger than data length %d", batchLength, len(data))
 	}
 	p += 4
 	partitionLeaderEpoch := binary.BigEndian.Uint32(data[p : p+4])
@@ -168,7 +168,7 @@ func parseMetadataRecordBatch(data []byte) (*MetadataRecordBatch, int, error) {
 	for i := 0; i < int(numRecords); i++ {
 		record, n, err := parseMetadataRecord(data[p:])
 		if err != nil {
-			return nil, batchLength, fmt.Errorf("Error parsing record: %w", err)
+			return nil, batchLength, fmt.Errorf("error parsing record %q: %w", data[p:], err)
 		}
 		p += n
 		records = append(records, record)
@@ -225,7 +225,7 @@ func parseMetadataRecord(data []byte) (any, int, error) {
 		return nil, recordLength, err
 	}
 	if headersCount > 0 {
-		return nil, recordLength, fmt.Errorf("Headers not supported yet")
+		return nil, recordLength, fmt.Errorf("headers not supported yet")
 	}
 
 	// parse the value
@@ -233,7 +233,7 @@ func parseMetadataRecord(data []byte) (any, int, error) {
 	p += 1
 	recordType := RecordType(data[p])
 	if recordType == RECORD_TYPE_UNKNOWN {
-		return nil, recordLength, fmt.Errorf("Unknown record type")
+		return nil, recordLength, fmt.Errorf("unknown record type %q", data[p])
 	}
 	p += 1
 	version := int8(data[p])
@@ -400,12 +400,18 @@ func extractTaggedFields(data []byte) ([]byte, int, error) {
 	return nil, p, nil
 }
 
+// extractReplicaList produces a slice of int32 replica ids from an input byte slice
+// as well as the number of bytes consumed/read
 func extractReplicaList(data []byte) ([]int32, int, error) {
 	p := 0
 	numReplicas, n, err := extractVarInt(data[p:])
 	p += n
 	if err != nil {
-		return nil, p, fmt.Errorf("Failed to extract replica list: %w", err)
+		return nil, p, fmt.Errorf("error getting the list length: %w", err)
+	}
+	minBytes := int(numReplicas)*4 + p
+	if minBytes > len(data) {
+		return nil, len(data), fmt.Errorf("not enough bytes according to length %v, got %v, required %v", numReplicas, len(data), minBytes)
 	}
 	replicas := make([]int32, 0, numReplicas)
 	for range numReplicas {
