@@ -129,15 +129,7 @@ func (d *Decoder) Varint() (int64, error) {
 	return int64((u >> 1) ^ uint64(-(u & 1))), nil
 }
 
-func (d *Decoder) ByteArray() ([]byte, error) {
-	length, err := d.Int32()
-	length--
-	if err != nil {
-		if err == io.EOF {
-			return nil, io.ErrUnexpectedEOF
-		}
-		return nil, err
-	}
+func (d *Decoder) ByteArray(length int) ([]byte, error) {
 	if length <= 0 {
 		return nil, nil
 	}

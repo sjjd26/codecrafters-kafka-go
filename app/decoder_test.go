@@ -319,7 +319,7 @@ func TestDecoder_Varint(t *testing.T) {
 func TestDecoder_ByteArray(t *testing.T) {
 	makePayload := func(n int) []byte {
 		b := make([]byte, n)
-		for i := range n {
+		for i := 0; i < n; i++ {
 			b[i] = byte(i % 256)
 		}
 		return b
@@ -327,91 +327,83 @@ func TestDecoder_ByteArray(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		lengthBE []byte // 4 bytes, big-endian int32 (raw before -1 inside method)
-		payload  []byte
+		length   int
+		input    []byte
 		want     []byte
 		wantPos  int
 		wantErr  bool
-		checkEOF bool // if true, expect io.ErrUnexpectedEOF
+		checkEOF bool // expect io.ErrUnexpectedEOF
 	}{
 		{
-			name:     "length 1 -> effective 0, returns nil",
-			lengthBE: []byte{0x00, 0x00, 0x00, 0x01},
-			payload:  nil,
-			want:     nil,
-			wantPos:  4,
-			wantErr:  false,
+			name:    "length 0 returns nil without reading",
+			length:  0,
+			input:   []byte{1, 2, 3},
+			want:    nil,
+			wantPos: 0,
+			wantErr: false,
 		},
 		{
-			name:     "length 0 -> effective -1, returns nil",
-			lengthBE: []byte{0x00, 0x00, 0x00, 0x00},
-			payload:  nil,
-			want:     nil,
-			wantPos:  4,
-			wantErr:  false,
+			name:    "negative length returns nil without reading",
+			length:  -5,
+			input:   []byte{1, 2, 3},
+			want:    nil,
+			wantPos: 0,
+			wantErr: false,
 		},
 		{
-			name:     "negative length -> effective <=0, returns nil",
-			lengthBE: []byte{0xff, 0xff, 0xff, 0xfb}, // -5
-			payload:  nil,
-			want:     nil,
-			wantPos:  4,
-			wantErr:  false,
+			name:    "exact read",
+			length:  4,
+			input:   []byte{1, 2, 3, 4},
+			want:    []byte{1, 2, 3, 4},
+			wantPos: 4,
+			wantErr: false,
 		},
 		{
-			name:     "reads payload",
-			lengthBE: []byte{0x00, 0x00, 0x00, 0x05}, // effective 4
-			payload:  []byte{1, 2, 3, 4},
-			want:     []byte{1, 2, 3, 4},
-			wantPos:  8,
-			wantErr:  false,
-		},
-		{
-			name:     "insufficient header",
-			lengthBE: []byte{0x00, 0x00, 0x00}, // only 3 bytes
-			payload:  nil,
+			name:     "empty input with positive length -> unexpected EOF",
+			length:   1,
+			input:    []byte{},
 			want:     nil,
-			wantPos:  3, // 3 bytes read before EOF
-			wantErr:  true,
-		},
-		{
-			name:     "insufficient payload",
-			lengthBE: []byte{0x00, 0x00, 0x00, 0x05}, // effective 4
-			payload:  []byte{1, 2},                   // only 2 bytes available
-			want:     nil,
-			wantPos:  6, // 4 (len) + 2 (read before EOF)
+			wantPos:  0, // nothing read
 			wantErr:  true,
 			checkEOF: true,
 		},
 		{
-			name:     "grows internal buffer (effective > 1024)",
-			lengthBE: []byte{0x00, 0x00, 0x04, 0x02}, // 1026 -> effective 1025
-			payload:  makePayload(1025),
-			want:     makePayload(1025),
-			wantPos:  4 + 1025,
-			wantErr:  false,
+			name:     "short read -> unexpected EOF (partial read)",
+			length:   4,
+			input:    []byte{9, 8},
+			want:     nil,
+			wantPos:  2, // advanced by bytes actually read
+			wantErr:  true,
+			checkEOF: true,
 		},
 		{
-			name:     "reads payload with extra trailing bytes",
-			lengthBE: []byte{0x00, 0x00, 0x00, 0x03}, // effective 2
-			payload:  []byte{9, 8, 7},                // 1 extra
-			want:     []byte{9, 8},
-			wantPos:  6, // 4 + 2 consumed; extra 1 remains unread
-			wantErr:  false,
+			name:    "read with extra trailing bytes (not consumed)",
+			length:  2,
+			input:   []byte{9, 8, 7, 6},
+			want:    []byte{9, 8},
+			wantPos: 2,
+			wantErr: false,
+		},
+		{
+			name:    "grows internal buffer (>1024)",
+			length:  1025,
+			input:   makePayload(1025),
+			want:    makePayload(1025),
+			wantPos: 1025,
+			wantErr: false,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			stream := append(append([]byte{}, tc.lengthBE...), tc.payload...)
-			d := NewDecoder(bytes.NewReader(stream))
-			got, err := d.ByteArray()
+			d := NewDecoder(bytes.NewReader(tc.input))
+			got, err := d.ByteArray(tc.length)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil (pos=%d)", d.pos)
 				}
 				if tc.checkEOF && !errors.Is(err, io.ErrUnexpectedEOF) {
-					t.Fatalf("expected io.ErrUnexpectedEOF, got %s", err)
+					t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
 				}
 				if d.pos != tc.wantPos {
 					t.Fatalf("pos mismatch: got %d want %d", d.pos, tc.wantPos)
@@ -429,9 +421,4 @@ func TestDecoder_ByteArray(t *testing.T) {
 			}
 		})
 	}
-}
-
-// small helper to avoid importing errors in multiple places
-func errorsIs(err, target error) bool {
-	return err != nil && target != nil && (err == target || (err.Error() == target.Error()))
 }
