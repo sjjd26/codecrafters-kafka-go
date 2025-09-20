@@ -464,44 +464,6 @@ func parseReplicaArray(d *Decoder) ([]int32, error) {
 	return replicas, nil
 }
 
-func extractVarInt(data []byte) (value uint64, consumed int, err error) {
-	const (
-		continuationMask = 0x80
-		dataMask         = 0x7f
-		maxBytes         = 10
-	)
-
-	var shift uint
-	for i, b := range data {
-		if i == maxBytes {
-			return 0, i, fmt.Errorf("varint too long")
-		}
-		// remove the continuation bit
-		part := uint64(b & dataMask)
-		// shift the
-		value |= part << shift
-		consumed = i + 1
-
-		if b&continuationMask == 0 {
-			// TODO: overflow sanity check on final byte if i==9
-			return value, consumed, nil
-		}
-		shift += 7
-	}
-
-	return 0, consumed, fmt.Errorf("incomplete varint")
-}
-
-func extractSignedVarInt(data []byte) (value int64, consumed int, err error) {
-	u, consumed, err := extractVarInt(data)
-	if err != nil {
-		return 0, consumed, err
-	}
-	// ZigZag decode
-	value = int64((u >> 1) ^ uint64(-(u & 1)))
-	return
-}
-
 func produceTopicMap() (TopicsByName, error) {
 	batches, err := retrieveClusterMetadata()
 	if err != nil {
