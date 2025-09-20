@@ -147,5 +147,7 @@ func (d *Decoder) ByteArray(length int) ([]byte, error) {
 	if n < int(length) {
 		return nil, io.ErrUnexpectedEOF
 	}
-	return d.buf[:length], nil
+	bytes := make([]byte, length)
+	copy(bytes, d.buf[:length])
+	return bytes, nil
 }

@@ -101,6 +101,7 @@ func retrieveClusterMetadata() ([]*MetadataRecordBatch, error) {
 		return nil, err
 	}
 	defer file.Close()
+	log.Printf("opened cluster metadata log at %s", CLUSTER_METADATA_PATH)
 	batches, err := parseClusterMetadata(NewDecoder(file))
 	if err != nil {
 		return nil, err
@@ -109,16 +110,9 @@ func retrieveClusterMetadata() ([]*MetadataRecordBatch, error) {
 }
 
 func parseClusterMetadata(d *Decoder) ([]*MetadataRecordBatch, error) {
-	// readBuf := make([]byte, 1024)
-	// n, err := file.Read(readBuf)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("error reading metadata file: %w", err)
-	// }
-
+	log.Println("parsing cluster metadata...")
 	var batches []*MetadataRecordBatch
-	// p := 0
 	for {
-
 		batch, err := parseMetadataRecordBatch(d)
 		if errors.Is(err, io.EOF) {
 			log.Println("EOF reached")
@@ -134,10 +128,12 @@ func parseClusterMetadata(d *Decoder) ([]*MetadataRecordBatch, error) {
 }
 
 func parseMetadataRecordBatch(d *Decoder) (*MetadataRecordBatch, error) {
+	log.Println("parsing metadata record batch...")
 	baseOffset, err := d.Int64()
 	if err != nil {
 		return nil, err
 	}
+	// log.Printf("read base offset %d", baseOffset)
 	// batch length, unused for now but needed to advance the reader
 	_, err = d.Int32()
 	if err != nil {
@@ -188,15 +184,22 @@ func parseMetadataRecordBatch(d *Decoder) (*MetadataRecordBatch, error) {
 		return nil, err
 	}
 
-	records := make([]any, 0, numRecords)
-	for i := 0; i < int(numRecords); i++ {
-		record, err := parseMetadataRecord(d)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing record: %w", err)
+	var records []any
+	if numRecords > 0 {
+		log.Printf("record batch has %d records", numRecords)
+		records = make([]any, 0, numRecords)
+		for i := 0; i < int(numRecords); i++ {
+			record, err := parseMetadataRecord(d)
+			if err != nil {
+				return nil, fmt.Errorf("error parsing record: %w", err)
+			}
+			records = append(records, record)
 		}
-		records = append(records, record)
+	} else {
+		log.Printf("record batch has no records")
 	}
 
+	log.Printf("parsed record batch %v", baseOffset)
 	recordBatch := &MetadataRecordBatch{
 		baseOffset:           baseOffset,
 		partitionLeaderEpoch: partitionLeaderEpoch,
@@ -209,12 +212,13 @@ func parseMetadataRecordBatch(d *Decoder) (*MetadataRecordBatch, error) {
 		producerID:           producerID,
 		producerEpoch:        producerEpoch,
 		baseSequence:         baseSequence,
-		records:              records,
+		records:              nil,
 	}
 	return recordBatch, nil
 }
 
 func parseMetadataRecord(d *Decoder) (any, error) {
+	log.Println("parsing basic metadata record...")
 	// record length is not used directly, but need to advance the reader
 	_, err := d.Varint()
 	if err != nil {
@@ -236,12 +240,9 @@ func parseMetadataRecord(d *Decoder) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	var key []byte
-	if keyLength > 0 {
-		key, err = d.ByteArray(int(keyLength))
-		if err != nil {
-			return nil, err
-		}
+	key, err := d.ByteArray(int(keyLength))
+	if err != nil {
+		return nil, err
 	}
 	// value length is not used directly, but need to advance the reader
 	_, err = d.Varint()
@@ -286,20 +287,30 @@ func parseMetadataRecord(d *Decoder) (any, error) {
 	case RECORD_TYPE_PARTITION:
 		record, err = parsePartitionRecord(d, base)
 	default:
-		return nil, fmt.Errorf("Record type not supported")
+		return nil, fmt.Errorf("record type not supported: %v, byte: %v", recordType, recordTypeByte)
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	headersCount, err := d.UVarint()
+	if err != nil {
+		return nil, err
+	}
+	if headersCount > 0 {
+		return nil, fmt.Errorf("record headers not supported yet")
 	}
 
 	return record, nil
 }
 
 func parseFeatureLevelRecord(d *Decoder, base *RecordBase) (*FeatureLevelRecord, error) {
-	nameLength, err := d.Varint()
+	log.Printf("parsing feature level record...")
+	nameLength, err := d.UVarint()
 	if err != nil {
 		return nil, err
 	}
+	nameLength-- // compact string so - 1
 	nameBytes, err := d.ByteArray(int(nameLength))
 	if err != nil {
 		return nil, err
@@ -323,10 +334,12 @@ func parseFeatureLevelRecord(d *Decoder, base *RecordBase) (*FeatureLevelRecord,
 }
 
 func parseTopicRecord(d *Decoder, base *RecordBase) (*TopicRecord, error) {
-	nameLength, err := d.Varint()
+	log.Println("parsing topic record...")
+	nameLength, err := d.UVarint()
 	if err != nil {
 		return nil, err
 	}
+	nameLength-- // compact string so - 1
 	nameBytes, err := d.ByteArray(int(nameLength))
 	if err != nil {
 		return nil, err
@@ -350,6 +363,7 @@ func parseTopicRecord(d *Decoder, base *RecordBase) (*TopicRecord, error) {
 }
 
 func parsePartitionRecord(d *Decoder, base *RecordBase) (*PartitionRecord, error) {
+	log.Println("parsing partition record...")
 	partitionId, err := d.Int32()
 	if err != nil {
 		return nil, err
@@ -386,10 +400,11 @@ func parsePartitionRecord(d *Decoder, base *RecordBase) (*PartitionRecord, error
 	if err != nil {
 		return nil, err
 	}
-	numDirectories, err := d.Varint()
+	numDirectories, err := d.UVarint()
 	if err != nil {
 		return nil, err
 	}
+	numDirectories-- // compact array so - 1
 	directories := make([]uuid, 0, numDirectories)
 	for range numDirectories {
 		dirId, err := d.UUID()
@@ -421,7 +436,7 @@ func parsePartitionRecord(d *Decoder, base *RecordBase) (*PartitionRecord, error
 }
 
 func parseTaggedFields(d *Decoder) ([]byte, error) {
-	numTaggedFields, err := d.Varint()
+	numTaggedFields, err := d.UVarint()
 	if err != nil {
 		return nil, fmt.Errorf("error parsing tagged fields: %w", err)
 	}
@@ -433,10 +448,11 @@ func parseTaggedFields(d *Decoder) ([]byte, error) {
 
 // parseReplicaArray produces a slice of int32 replica ids from the decoder
 func parseReplicaArray(d *Decoder) ([]int32, error) {
-	numReplicas, err := d.Varint()
+	numReplicas, err := d.UVarint()
 	if err != nil {
 		return nil, err
 	}
+	numReplicas-- // compact array so - 1
 	replicas := make([]int32, 0, numReplicas)
 	for range numReplicas {
 		replica, err := d.Int32()
