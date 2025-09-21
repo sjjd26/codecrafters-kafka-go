@@ -193,12 +193,14 @@ func handleDescribeTopicPartitionsRequest(request *KafkaRequest, topicsByName To
 	// 4 byte throttle time
 	body = append(body, 0x00, 0x00, 0x00, 0x00)
 	// topics array, first the length
-	body = append(body, byte(arrayLen+1))
+	body = binary.AppendUvarint(body, uint64(len(topicNames)+1))
 	for _, topicName := range topicNames {
 		topic, exists := topicsByName[string(topicName)]
 		if !exists {
+			log.Printf("Unknown topic %s", topicName)
 			body = append(body, unknownTopicResponse(topicName)...)
 		} else {
+			log.Printf("Known topic %s: %v", topicName, &topic)
 			body = append(body, topicResponse(topic)...)
 		}
 	}
@@ -213,18 +215,19 @@ func handleDescribeTopicPartitionsRequest(request *KafkaRequest, topicsByName To
 func unknownTopicResponse(topicName []byte) []byte {
 	respLength := 2 + 1 + len(topicName) + 16 + 1 + 1 + 4 + 1
 	resp := make([]byte, 0, respLength)
+	// 2 byte error code
 	resp = binary.BigEndian.AppendUint16(resp, UNKNOWN_TOPIC_ERR)
 	// topic name length
-	resp = appendVarint(resp, int64(len(topicName)+1))
+	resp = binary.AppendUvarint(resp, uint64(len(topicName)+1))
 	// topic name
 	resp = append(resp, topicName...)
 	// topic ID (16-byte UUID) all zeros, indicating null / unassigned UUID
-	topicId := make([]byte, 16)
-	resp = append(resp, topicId...)
+	var topicId uuid
+	resp = append(resp, topicId[:]...)
 	// is internal (0 for no)
 	resp = append(resp, 0x00)
 	// partitions array (just return length 1 for now to indicate an empty array)
-	resp = append(resp, 0x01)
+	resp = binary.AppendUvarint(resp, 1)
 	// topic authorized operations, a 4 byte bitfield representing the authorized topics,
 	// see list https://github.com/apache/kafka/blob/1962917436f463541f9bb63791b7ed55c23ce8c1/clients/src/main/java/org/apache/kafka/common/acl/AclOperation.java#L44
 	authorizedOperations := uint32(0x0d_f8)
@@ -237,9 +240,9 @@ func topicResponse(topic *Topic) []byte {
 	respLength := 2 + 1 + len(topic.name) + 16 + 1 + 1 + 4 + 1
 	resp := make([]byte, 0, respLength)
 	// 2 byte error code
-	resp = binary.BigEndian.AppendUint16(resp, 0x00)
+	resp = binary.BigEndian.AppendUint16(resp, 0)
 	// topic name length
-	resp = appendVarint(resp, int64(len(topic.name)+1))
+	resp = binary.AppendUvarint(resp, uint64(len(topic.name)+1))
 	// topic name
 	resp = append(resp, topic.name...)
 	// topic ID (16-byte UUID)
@@ -251,7 +254,9 @@ func topicResponse(topic *Topic) []byte {
 		resp = append(resp, 0x00)
 	}
 	// partitions array, first the length
-	resp = append(resp, byte(len(topic.partitions)+1))
+	log.Printf("adding %d partitions: %v", len(topic.partitions), &topic.partitions)
+	// resp = append(resp, byte(len(topic.partitions)+1))
+	resp = binary.AppendUvarint(resp, uint64(len(topic.partitions)+1))
 	for _, partition := range topic.partitions {
 		// 2 byte error code
 		resp = binary.BigEndian.AppendUint16(resp, uint16(partition.errorCode))
@@ -262,27 +267,27 @@ func topicResponse(topic *Topic) []byte {
 		// 4 byte leader epoch
 		resp = binary.BigEndian.AppendUint32(resp, uint32(partition.leaderEpoch))
 		// 4 byte array of 4 byte replica broker IDs
-		resp = binary.BigEndian.AppendUint32(resp, uint32(len(partition.replicas)))
+		resp = binary.AppendUvarint(resp, uint64(len(partition.replicas)+1))
 		for _, replica := range partition.replicas {
 			resp = binary.BigEndian.AppendUint32(resp, uint32(replica))
 		}
 		// 4 byte array of 4 byte in-sync replica broker IDs
-		resp = binary.BigEndian.AppendUint32(resp, uint32(len(partition.inSyncReplicas)))
+		resp = binary.AppendUvarint(resp, uint64(len(partition.inSyncReplicas)+1))
 		for _, isr := range partition.inSyncReplicas {
 			resp = binary.BigEndian.AppendUint32(resp, uint32(isr))
 		}
 		// eligible leaders array
-		resp = binary.BigEndian.AppendUint32(resp, uint32(len(partition.eligibleLeaderReplicas)))
+		resp = binary.AppendUvarint(resp, uint64(len(partition.eligibleLeaderReplicas)+1))
 		for _, elr := range partition.eligibleLeaderReplicas {
 			resp = binary.BigEndian.AppendUint32(resp, uint32(elr))
 		}
 		// last known eligible leaders array
-		resp = binary.BigEndian.AppendUint32(resp, uint32(len(partition.lastKnownEligibleLeaders)))
+		resp = binary.AppendUvarint(resp, uint64(len(partition.lastKnownEligibleLeaders)+1))
 		for _, lk := range partition.lastKnownEligibleLeaders {
 			resp = binary.BigEndian.AppendUint32(resp, uint32(lk))
 		}
 		// offline replica IDs array
-		resp = binary.BigEndian.AppendUint32(resp, uint32(len(partition.offlineReplicas)))
+		resp = binary.AppendUvarint(resp, uint64(len(partition.offlineReplicas)+1))
 		for _, or := range partition.offlineReplicas {
 			resp = binary.BigEndian.AppendUint32(resp, uint32(or))
 		}
