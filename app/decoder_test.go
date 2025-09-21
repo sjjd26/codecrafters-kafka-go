@@ -422,3 +422,136 @@ func TestDecoder_ByteArray(t *testing.T) {
 		})
 	}
 }
+
+func TestDecoder_NullableBytes(t *testing.T) {
+	makePayload := func(n int) []byte {
+		b := make([]byte, n)
+		for i := 0; i < n; i++ {
+			b[i] = byte(i % 256)
+		}
+		return b
+	}
+
+	type tc struct {
+		name     string
+		length   int16  // used when raw == nil
+		payload  []byte // appended after the 2-byte length
+		raw      []byte // if set, use this exact stream (no length prefix built)
+		want     []byte
+		wantPos  int
+		wantErr  bool
+		checkEOF bool // specifically expect io.ErrUnexpectedEOF
+	}
+
+	tests := []tc{
+		{
+			name:    "empty input -> error",
+			raw:     []byte{},
+			want:    nil,
+			wantPos: 0,
+			wantErr: true,
+		},
+		{
+			name:    "short length header (1 byte) -> error",
+			raw:     []byte{0x00},
+			want:    nil,
+			wantPos: 1, // Int16 advanced by 1 then errored
+			wantErr: true,
+		},
+		{
+			name:    "negative length returns nil without reading payload",
+			length:  -1,
+			payload: []byte{1, 2, 3},
+			want:    nil,
+			wantPos: 2, // only length consumed
+			wantErr: false,
+		},
+		{
+			name:    "zero length returns nil without reading payload",
+			length:  0,
+			payload: []byte{1, 2, 3},
+			want:    nil,
+			wantPos: 2, // only length consumed
+			wantErr: false,
+		},
+		{
+			name:    "positive length exact read",
+			length:  4,
+			payload: []byte{9, 8, 7, 6},
+			want:    []byte{9, 8, 7, 6},
+			wantPos: 6, // 2 (len) + 4 (payload)
+			wantErr: false,
+		},
+		{
+			name:     "positive length but no payload -> unexpected EOF",
+			length:   3,
+			payload:  []byte{},
+			want:     nil,
+			wantPos:  2, // only the length was consumed
+			wantErr:  true,
+			checkEOF: true,
+		},
+		{
+			name:     "short payload -> unexpected EOF with partial read",
+			length:   5,
+			payload:  []byte{1, 2},
+			want:     nil,
+			wantPos:  2 + 2, // 2 (len) + 2 bytes actually read before EOF
+			wantErr:  true,
+			checkEOF: true,
+		},
+		{
+			name:    "positive length with extra trailing bytes (not consumed)",
+			length:  2,
+			payload: []byte{4, 5, 6, 7},
+			want:    []byte{4, 5},
+			wantPos: 4, // 2 (len) + 2 consumed
+			wantErr: false,
+		},
+		{
+			name:    "large payload grows internal buffer",
+			length:  1025,
+			payload: makePayload(1025),
+			want:    makePayload(1025),
+			wantPos: 2 + 1025,
+			wantErr: false,
+		},
+	}
+
+	build := func(length int16, payload []byte) []byte {
+		h := []byte{byte(uint16(length) >> 8), byte(uint16(length))}
+		return append(h, payload...)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stream := tt.raw
+			if stream == nil {
+				stream = build(tt.length, tt.payload)
+			}
+			d := NewDecoder(bytes.NewReader(stream))
+			got, err := d.NullableBytes()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (pos=%d)", d.pos)
+				}
+				if tt.checkEOF && !errors.Is(err, io.ErrUnexpectedEOF) {
+					t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
+				}
+				if d.pos != tt.wantPos {
+					t.Fatalf("pos mismatch: got %d want %d", d.pos, tt.wantPos)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("value mismatch")
+			}
+			if d.pos != tt.wantPos {
+				t.Fatalf("pos mismatch: got %d want %d", d.pos, tt.wantPos)
+			}
+		})
+	}
+}
