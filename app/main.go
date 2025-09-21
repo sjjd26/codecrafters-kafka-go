@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -186,7 +187,8 @@ func handleClient(clientFd int, kContext *KafkaContext) error {
 
 	// for now just assume the input is always one command and valid
 	// no detailed parsing
-	response, err := handleInput(readBuf, kContext)
+	reader := bytes.NewReader(readBuf)
+	response, err := handleInput(NewDecoder(reader), kContext)
 	if err != nil {
 		return fmt.Errorf("Error handling input: %w", err)
 	}

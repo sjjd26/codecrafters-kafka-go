@@ -151,3 +151,14 @@ func (d *Decoder) ByteArray(length int) ([]byte, error) {
 	copy(bytes, d.buf[:length])
 	return bytes, nil
 }
+
+func (d *Decoder) NullableBytes() ([]byte, error) {
+	length, err := d.Int16()
+	if err != nil {
+		return nil, err
+	}
+	if length < 0 {
+		return nil, nil
+	}
+	return d.ByteArray(int(length))
+}
