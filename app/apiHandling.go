@@ -174,6 +174,11 @@ func handleDescribeTopicPartitionsRequest(d *Decoder, topicsByName TopicsByName)
 			return nil, err
 		}
 		topicNames = append(topicNames, topicName)
+		// tag buffer
+		_, err = d.Int8()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	log.Printf("Got %v topics from DescribeTopicPartitions request, topics: %s", len(topicNames), topicNames)
