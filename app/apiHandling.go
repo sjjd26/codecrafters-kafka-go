@@ -10,6 +10,7 @@ const INVALID_VERSION_ERR int16 = 35
 const UNKNOWN_TOPIC_ERR int16 = 3
 const TAG_BUFFER = 0x00
 
+const FETCH int16 = 1
 const API_VERSIONS int16 = 18
 const DESCRIBE_TOPIC_PARTITIONS int16 = 75
 
@@ -48,6 +49,11 @@ var apiVersions = map[int16]*ApiVersion{
 		apiKey:       DESCRIBE_TOPIC_PARTITIONS,
 		minSupported: 0,
 		maxSupported: 0,
+	},
+	FETCH: {
+		apiKey:       FETCH,
+		minSupported: 16,
+		maxSupported: 16,
 	},
 }
 
