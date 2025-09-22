@@ -163,6 +163,34 @@ func createApiVersionsBytes() []byte {
 // ---------------- Describe Topic Partitions -----------------
 
 func handleDescribeTopicPartitionsRequest(d *Decoder, topicsByName TopicsByName) ([]byte, error) {
+	topicNames, err := parseDescribeTopicPartitionsBody(d)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing DescribeTopicPartitions body: %w", err)
+	}
+
+	// body
+	var body []byte
+	// 4 byte throttle time
+	body = append(body, 0x00, 0x00, 0x00, 0x00)
+	// topics array, first the length
+	body = binary.AppendUvarint(body, uint64(len(topicNames)+1))
+	for _, topicName := range topicNames {
+		topic, exists := topicsByName[string(topicName)]
+		if !exists {
+			log.Printf("Unknown topic %s", topicName)
+			body = append(body, unknownTopicResponse(topicName)...)
+		} else {
+			log.Printf("Known topic %s: %v", topicName, &topic)
+			body = append(body, topicResponse(topic)...)
+		}
+	}
+	// next cursor (used for pagination, return 0xff null value for now) + tag buffer
+	body = append(body, 0xff, TAG_BUFFER)
+
+	return body, nil
+}
+
+func parseDescribeTopicPartitionsBody(d *Decoder) ([][]byte, error) {
 	arrayLen, err := d.Int8()
 	arrayLen--
 	if err != nil {
@@ -188,29 +216,7 @@ func handleDescribeTopicPartitionsRequest(d *Decoder, topicsByName TopicsByName)
 	}
 
 	log.Printf("Got %v topics from DescribeTopicPartitions request, topics: %s", len(topicNames), topicNames)
-
-	// body
-	var body []byte
-	// 4 byte throttle time
-	body = append(body, 0x00, 0x00, 0x00, 0x00)
-	// topics array, first the length
-	body = binary.AppendUvarint(body, uint64(len(topicNames)+1))
-	for _, topicName := range topicNames {
-		topic, exists := topicsByName[string(topicName)]
-		if !exists {
-			log.Printf("Unknown topic %s", topicName)
-			body = append(body, unknownTopicResponse(topicName)...)
-		} else {
-			log.Printf("Known topic %s: %v", topicName, &topic)
-			body = append(body, topicResponse(topic)...)
-		}
-	}
-	// next cursor (used for pagination, return 0xff null value for now) + tag buffer
-	body = append(body, 0xff, TAG_BUFFER)
-
-	log.Printf("Response body length: %v", len(body))
-
-	return body, nil
+	return topicNames, nil
 }
 
 func unknownTopicResponse(topicName []byte) []byte {

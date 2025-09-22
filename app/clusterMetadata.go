@@ -360,7 +360,7 @@ func parseTopicRecord(d *Decoder, base *RecordBase) (*TopicRecord, error) {
 		topicId:    topicId,
 	}
 
-	log.Printf("parsed topic record: %s (%x)", record.name, record.topicId)
+	// log.Printf("parsed topic record: %s (%x)", record.name, record.topicId)
 
 	return record, nil
 }
