@@ -29,3 +29,12 @@ func (e *Encoder) Int8(n int8) {
 	}
 	_, e.err = e.writer.Write([]byte{byte(n)})
 }
+
+func (e *Encoder) Int16(n int16) {
+	if e.err != nil {
+		return
+	}
+	e.scratch[0] = byte(n)
+	e.scratch[1] = byte(n >> 8)
+	_, e.err = e.writer.Write(e.scratch[:2])
+}
