@@ -44,6 +44,14 @@ func (e *Encoder) UVarint(v uint64) {
 	e.buf = binary.AppendUvarint(e.buf, v)
 }
 
+func (e *Encoder) Varint(v uint64) {
+	e.buf = binary.AppendVarint(e.buf, int64(v))
+}
+
 func (e *Encoder) UUID(u uuid) {
 	e.buf = append(e.buf, u[:]...)
+}
+
+func (e *Encoder) Prepend(b []byte) {
+	e.buf = append(b, e.buf...)
 }
