@@ -97,6 +97,10 @@ type PartitionRecord struct {
 
 func retrieveClusterMetadata() ([]*MetadataRecordBatch, error) {
 	file, err := os.Open(CLUSTER_METADATA_PATH)
+	if os.IsNotExist(err) {
+		log.Println("no cluster metadata log found, starting with empty topic map")
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}

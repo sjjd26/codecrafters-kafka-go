@@ -60,7 +60,7 @@ var apiVersions = map[int16]*ApiVersion{
 func handleInput(d *Decoder, kContext *KafkaContext) ([]byte, error) {
 	headers, err := parseInputHeaders(d)
 	if err != nil {
-		return nil, fmt.Errorf("Error parsing input: %w", err)
+		return nil, fmt.Errorf("error parsing input: %w", err)
 	}
 
 	e := NewEncoder(4)
@@ -75,11 +75,15 @@ func handleInput(d *Decoder, kContext *KafkaContext) ([]byte, error) {
 		// v1 response header has a tag buffer
 		e.Int8(TAG_BUFFER)
 		err = handleDescribeTopicPartitionsRequest(e, d, kContext.topicsByName)
+	case FETCH:
+		// v1 response header has a tag buffer
+		e.Int8(TAG_BUFFER)
+		err = handleFetchRequest(e, d)
 	default:
-		return nil, fmt.Errorf("Unsupported request api key: %v", headers.apiKey)
+		return nil, fmt.Errorf("unsupported request api key: %v", headers.apiKey)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("Error handling request: %w", err)
+		return nil, fmt.Errorf("error handling request: %w", err)
 	}
 
 	// now add the message size at the beginning
@@ -146,7 +150,7 @@ func handleApiVersionsRequest(e *Encoder, headers *KafkaRequestHeaders) error {
 }
 
 func writeApiVersionsBytes(e *Encoder) {
-	e.Varint(uint64(len(apiVersions) + 1))
+	e.UVarint(uint64(len(apiVersions) + 1))
 	for _, v := range apiVersions {
 		e.Int16(v.apiKey)
 		e.Int16(v.minSupported)
@@ -177,7 +181,8 @@ func handleDescribeTopicPartitionsRequest(e *Encoder, d *Decoder, topicsByName T
 			writeTopicResponse(e, topic)
 		}
 	}
-	// next cursor (used for pagination, return 0xff null value for now) + tag buffer
+	// next cursor (used for pagination, return -1/0xff null value for now) + tag buffer
+	e.Int8(-1)
 	e.Int8(TAG_BUFFER)
 
 	return nil
@@ -286,4 +291,20 @@ func writeTopicResponse(e *Encoder, topic *Topic) {
 	// topic authorized operations, a 4 byte bitfield representing the authorized topics
 	e.Int32(int32(topic.authorizedOperations))
 	e.Int8(TAG_BUFFER)
+}
+
+// -------------------- Fetch -------------------------
+
+func handleFetchRequest(e *Encoder, d *Decoder) error {
+	// throttle time
+	e.Int32(0)
+	// error code
+	e.Int16(0)
+	// session id
+	e.Int32(0)
+	// number of topics (just return 0 for now)
+	e.UVarint(1)
+	// tag buffer
+	e.Int8(TAG_BUFFER)
+	return nil
 }
