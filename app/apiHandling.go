@@ -18,19 +18,42 @@ type KafkaContext struct {
 	topicsByName TopicsByName
 }
 
-type KafkaRequest struct {
-	apiKey        uint16
-	apiVersion    uint16
-	correlationId uint32
-	clientId      []byte
-	body          []byte
-}
-
 type KafkaRequestHeaders struct {
 	apiKey        int16
 	apiVersion    int16
 	correlationId int32
 	clientId      []byte
+}
+
+type FetchRequest struct {
+	KafkaRequestHeaders
+	maxWait         int32
+	minBytes        int32
+	maxBytes        int32
+	isolationLevel  int8
+	sessionId       int32
+	sessionEpoch    int32
+	topics          []FetchTopic
+	forgottenTopics []ForgottenFetchTopic
+}
+
+type FetchTopic struct {
+	topicId    uuid
+	partitions []FetchPartition
+}
+
+type FetchPartition struct {
+	partition          int32
+	currentLeaderEpoch int32
+	fetchOffset        int64
+	lastFetchedEpoch   int32
+	logStartOffset     int64
+	maxBytes           int32
+}
+
+type ForgottenFetchTopic struct {
+	topicId    uuid
+	partitions []int32
 }
 
 type ApiVersion struct {
@@ -162,7 +185,7 @@ func writeApiVersionsBytes(e *Encoder) {
 // ---------------- Describe Topic Partitions -----------------
 
 func handleDescribeTopicPartitionsRequest(e *Encoder, d *Decoder, topicsByName TopicsByName) error {
-	topicNames, err := parseDescribeTopicPartitionsBody(d)
+	topicNames, err := parseDescribeTopicPartitionsRequest(d)
 	if err != nil {
 		return fmt.Errorf("error parsing DescribeTopicPartitions body: %w", err)
 	}
@@ -188,7 +211,7 @@ func handleDescribeTopicPartitionsRequest(e *Encoder, d *Decoder, topicsByName T
 	return nil
 }
 
-func parseDescribeTopicPartitionsBody(d *Decoder) ([][]byte, error) {
+func parseDescribeTopicPartitionsRequest(d *Decoder) ([][]byte, error) {
 	arrayLen, err := d.Int8()
 	arrayLen--
 	if err != nil {
@@ -262,30 +285,15 @@ func writeTopicResponse(e *Encoder, topic *Topic) {
 		// 4 byte leader epoch
 		e.Int32(partition.leaderEpoch)
 		// 4 byte array of 4 byte replica broker IDs
-		e.UVarint(uint64(len(partition.replicas) + 1))
-		for _, replica := range partition.replicas {
-			e.Int32(replica)
-		}
+		writeReplicaArray(e, partition.replicas)
 		// 4 byte array of 4 byte in-sync replica broker IDs
-		e.UVarint(uint64(len(partition.inSyncReplicas) + 1))
-		for _, isr := range partition.inSyncReplicas {
-			e.Int32(isr)
-		}
+		writeReplicaArray(e, partition.inSyncReplicas)
 		// eligible leaders array
-		e.UVarint(uint64(len(partition.eligibleLeaderReplicas) + 1))
-		for _, elr := range partition.eligibleLeaderReplicas {
-			e.Int32(elr)
-		}
+		writeReplicaArray(e, partition.eligibleLeaderReplicas)
 		// last known eligible leaders array
-		e.UVarint(uint64(len(partition.lastKnownEligibleLeaders) + 1))
-		for _, lk := range partition.lastKnownEligibleLeaders {
-			e.Int32(lk)
-		}
+		writeReplicaArray(e, partition.lastKnownEligibleLeaders)
 		// offline replica IDs array
-		e.UVarint(uint64(len(partition.offlineReplicas) + 1))
-		for _, or := range partition.offlineReplicas {
-			e.Int32(or)
-		}
+		writeReplicaArray(e, partition.offlineReplicas)
 		e.Int8(TAG_BUFFER)
 	}
 	// topic authorized operations, a 4 byte bitfield representing the authorized topics
@@ -293,18 +301,147 @@ func writeTopicResponse(e *Encoder, topic *Topic) {
 	e.Int8(TAG_BUFFER)
 }
 
+func writeReplicaArray(e *Encoder, replicas []int32) {
+	e.UVarint(uint64(len(replicas) + 1))
+	for _, replica := range replicas {
+		e.Int32(replica)
+	}
+}
+
 // -------------------- Fetch -------------------------
 
 func handleFetchRequest(e *Encoder, d *Decoder) error {
+	fetchRequest, err := parseFetchRequest(d)
+	if err != nil {
+		return fmt.Errorf("error parsing Fetch body: %w", err)
+	}
+
 	// throttle time
 	e.Int32(0)
 	// error code
 	e.Int16(0)
 	// session id
-	e.Int32(0)
+	e.Int32(fetchRequest.sessionId)
 	// number of topics (just return 0 for now)
 	e.UVarint(1)
 	// tag buffer
 	e.Int8(TAG_BUFFER)
 	return nil
+}
+
+func parseFetchRequest(d *Decoder) (*FetchRequest, error) {
+	maxWait, err := d.Int32()
+	if err != nil {
+		return nil, err
+	}
+	minBytes, err := d.Int32()
+	if err != nil {
+		return nil, err
+	}
+	maxBytes, err := d.Int32()
+	if err != nil {
+		return nil, err
+	}
+	isolationLevel, err := d.Int8()
+	if err != nil {
+		return nil, err
+	}
+	sessionId, err := d.Int32()
+	if err != nil {
+		return nil, err
+	}
+	sessionEpoch, err := d.Int32()
+	if err != nil {
+		return nil, err
+	}
+
+	topicCount, err := d.UVarint()
+	topicCount--
+	if err != nil {
+		return nil, err
+	}
+	for i := uint64(0); i < topicCount; i++ {
+		var topic FetchTopic
+		topicId, err := d.UUID()
+		if err != nil {
+			return nil, err
+		}
+		topic.topicId = topicId
+		partitionCount, err := d.UVarint()
+		partitionCount--
+		if err != nil {
+			return nil, err
+		}
+		for j := uint64(0); j < partitionCount; j++ {
+			var partition FetchPartition
+			partition.partition, err = d.Int32()
+			if err != nil {
+				return nil, err
+			}
+			partition.currentLeaderEpoch, err = d.Int32()
+			if err != nil {
+				return nil, err
+			}
+			partition.fetchOffset, err = d.Int64()
+			if err != nil {
+				return nil, err
+			}
+			partition.lastFetchedEpoch, err = d.Int32()
+			if err != nil {
+				return nil, err
+			}
+			partition.logStartOffset, err = d.Int64()
+			if err != nil {
+				return nil, err
+			}
+			partition.maxBytes, err = d.Int32()
+			if err != nil {
+				return nil, err
+			}
+			topic.partitions = append(topic.partitions, partition)
+		}
+		d.Int8() // tag buffer
+	}
+
+	forgottenTopicCount, err := d.UVarint()
+	forgottenTopicCount--
+	if err != nil {
+		return nil, err
+	}
+	for i := uint64(0); i < forgottenTopicCount; i++ {
+		var forgottenTopic ForgottenFetchTopic
+		topicId, err := d.UUID()
+		if err != nil {
+			return nil, err
+		}
+		forgottenTopic.topicId = topicId
+		partitionCount, err := d.UVarint()
+		partitionCount--
+		if err != nil {
+			return nil, err
+		}
+		for j := uint64(0); j < partitionCount; j++ {
+			partition, err := d.Int32()
+			if err != nil {
+				return nil, err
+			}
+			forgottenTopic.partitions = append(forgottenTopic.partitions, partition)
+		}
+		d.Int8() // tag buffer
+	}
+	// 1 byte tag buffer
+	_, err = d.Int8()
+	if err != nil {
+		return nil, err
+	}
+
+	fetchRequest := &FetchRequest{
+		maxWait:        maxWait,
+		minBytes:       minBytes,
+		maxBytes:       maxBytes,
+		isolationLevel: isolationLevel,
+		sessionId:      sessionId,
+		sessionEpoch:   sessionEpoch,
+	}
+	return fetchRequest, nil
 }
