@@ -316,16 +316,7 @@ func handleFetchRequest(e *Encoder, d *Decoder) error {
 		return fmt.Errorf("error parsing Fetch body: %w", err)
 	}
 
-	// throttle time
-	e.Int32(0)
-	// error code
-	e.Int16(0)
-	// session id
-	e.Int32(fetchRequest.sessionId)
-	// number of topics (just return 0 for now)
-	e.UVarint(1)
-	// tag buffer
-	e.Int8(TAG_BUFFER)
+	writeFetchResponse(e, fetchRequest)
 	return nil
 }
 
@@ -444,4 +435,23 @@ func parseFetchRequest(d *Decoder) (*FetchRequest, error) {
 		sessionEpoch:   sessionEpoch,
 	}
 	return fetchRequest, nil
+}
+
+func writeFetchResponse(e *Encoder, fetchRequest *FetchRequest) {
+	// throttle time
+	e.Int32(0)
+	// error code
+	e.Int16(0)
+	// session id
+	e.Int32(fetchRequest.sessionId)
+
+	// topics
+	e.UVarint(uint64(len(fetchRequest.topics) + 1))
+	for _, topic := range fetchRequest.topics {
+		// topic id
+		e.UUID(topic.topicId)
+		
+
+	// tag buffer
+	e.Int8(TAG_BUFFER)
 }
