@@ -471,10 +471,10 @@ func parseReplicaArray(d *Decoder) ([]int32, error) {
 	return replicas, nil
 }
 
-func produceTopicMap() (TopicsByName, error) {
+func produceTopicMap() (TopicsByName, TopicsById, error) {
 	batches, err := retrieveClusterMetadata()
 	if err != nil {
-		return nil, fmt.Errorf("error retrieving cluster metadata: %w", err)
+		return nil, nil, fmt.Errorf("error retrieving cluster metadata: %w", err)
 	}
 
 	// log.Printf("retrieved %d metadata record batches: %v", len(batches), batches)
@@ -488,7 +488,7 @@ func produceTopicMap() (TopicsByName, error) {
 				topic, exists := topicIdMap[r.topicId]
 				if exists {
 					if topic.name != "" {
-						return nil, fmt.Errorf("duplicate topic ID found in metadata: %x", r.topicId)
+						return nil, nil, fmt.Errorf("duplicate topic ID found in metadata: %x", r.topicId)
 					}
 					topic.name = r.name
 				} else {
@@ -521,7 +521,7 @@ func produceTopicMap() (TopicsByName, error) {
 			case *FeatureLevelRecord:
 				// ignore for now
 			default:
-				return nil, fmt.Errorf("unknown record type in metadata batch: %T", r)
+				return nil, nil, fmt.Errorf("unknown record type in metadata batch: %T", r)
 			}
 		}
 	}
@@ -529,13 +529,13 @@ func produceTopicMap() (TopicsByName, error) {
 	topicNameMap := make(TopicsByName)
 	for _, topic := range topicIdMap {
 		if topic.name == "" {
-			return nil, fmt.Errorf("topic with ID %x has no name", topic.id)
+			return nil, nil, fmt.Errorf("topic with ID %x has no name", topic.id)
 		}
 		if _, exists := topicNameMap[topic.name]; exists {
-			return nil, fmt.Errorf("duplicate topic name found in metadata: %s", topic.name)
+			return nil, nil, fmt.Errorf("duplicate topic name found in metadata: %s", topic.name)
 		}
 		topicNameMap[topic.name] = topic
 	}
 
-	return topicNameMap, nil
+	return topicNameMap, topicIdMap, nil
 }

@@ -17,6 +17,7 @@ const DESCRIBE_TOPIC_PARTITIONS int16 = 75
 
 type KafkaContext struct {
 	topicsByName TopicsByName
+	topicsById   TopicsById
 }
 
 type KafkaRequestHeaders struct {
@@ -102,7 +103,7 @@ func handleInput(d *Decoder, kContext *KafkaContext) ([]byte, error) {
 	case FETCH:
 		// v1 response header has a tag buffer
 		e.Int8(TAG_BUFFER)
-		err = handleFetchRequest(e, d)
+		err = handleFetchRequest(e, d, kContext.topicsById)
 	default:
 		return nil, fmt.Errorf("unsupported request api key: %v", headers.apiKey)
 	}
@@ -311,13 +312,13 @@ func writeReplicaArray(e *Encoder, replicas []int32) {
 
 // -------------------- Fetch -------------------------
 
-func handleFetchRequest(e *Encoder, d *Decoder) error {
+func handleFetchRequest(e *Encoder, d *Decoder, topicsById TopicsById) error {
 	fetchRequest, err := parseFetchRequest(d)
 	if err != nil {
 		return fmt.Errorf("error parsing Fetch body: %w", err)
 	}
 
-	writeFetchResponse(e, fetchRequest)
+	writeFetchResponse(e, fetchRequest, topicsById)
 	return nil
 }
 
@@ -454,7 +455,7 @@ func parseFetchRequest(d *Decoder) (*FetchRequest, error) {
 	return fetchRequest, nil
 }
 
-func writeFetchResponse(e *Encoder, fetchRequest *FetchRequest) {
+func writeFetchResponse(e *Encoder, fetchRequest *FetchRequest, topicsById TopicsById) {
 	// throttle time
 	e.Int32(0)
 	// error code
@@ -464,16 +465,22 @@ func writeFetchResponse(e *Encoder, fetchRequest *FetchRequest) {
 
 	// topics
 	e.UVarint(uint64(len(fetchRequest.topics) + 1))
-	for _, topic := range fetchRequest.topics {
-		// topic id
-		e.UUID(topic.topicId)
+	for _, requestTopic := range fetchRequest.topics {
+		matchedTopic := topicsById[requestTopic.topicId]
 
-		e.UVarint(uint64(len(topic.partitions) + 1))
-		for _, partition := range topic.partitions {
+		// topic id
+		e.UUID(requestTopic.topicId)
+
+		e.UVarint(uint64(len(requestTopic.partitions) + 1))
+		for _, partition := range requestTopic.partitions {
 			// partition index
 			e.Int32(partition.partition)
 			// error code
-			e.Int16(UNKNOWN_TOPIC_ID_ERR)
+			if matchedTopic == nil {
+				e.Int16(UNKNOWN_TOPIC_ID_ERR)
+			} else {
+				e.Int16(0)
+			}
 			// high watermark
 			e.Int64(-1)
 			// last stable offset
