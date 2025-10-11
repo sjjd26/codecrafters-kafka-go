@@ -8,6 +8,7 @@ import (
 
 const INVALID_VERSION_ERR int16 = 35
 const UNKNOWN_TOPIC_ERR int16 = 3
+const UNKNOWN_TOPIC_ID_ERR int16 = 100
 const TAG_BUFFER = 0x00
 
 const FETCH int16 = 1
@@ -346,12 +347,15 @@ func parseFetchRequest(d *Decoder) (*FetchRequest, error) {
 		return nil, err
 	}
 
+	// topics
+	var topics []FetchTopic
 	topicCount, err := d.UVarint()
 	topicCount--
 	if err != nil {
 		return nil, err
 	}
-	for i := uint64(0); i < topicCount; i++ {
+	log.Printf("Fetch request for %d topics", topicCount)
+	for range topicCount {
 		var topic FetchTopic
 		topicId, err := d.UUID()
 		if err != nil {
@@ -363,7 +367,8 @@ func parseFetchRequest(d *Decoder) (*FetchRequest, error) {
 		if err != nil {
 			return nil, err
 		}
-		for j := uint64(0); j < partitionCount; j++ {
+		log.Printf("Topic %s has %d partitions", topicId, partitionCount)
+		for range partitionCount {
 			var partition FetchPartition
 			partition.partition, err = d.Int32()
 			if err != nil {
@@ -389,17 +394,28 @@ func parseFetchRequest(d *Decoder) (*FetchRequest, error) {
 			if err != nil {
 				return nil, err
 			}
+			_, err = d.Int8() // tag buffer
+			if err != nil {
+				return nil, err
+			}
 			topic.partitions = append(topic.partitions, partition)
 		}
-		d.Int8() // tag buffer
+		_, err = d.Int8() // tag buffer
+		if err != nil {
+			return nil, err
+		}
+		topics = append(topics, topic)
 	}
 
+	// forgotten topics
+	var forgottenTopics []ForgottenFetchTopic
 	forgottenTopicCount, err := d.UVarint()
 	forgottenTopicCount--
 	if err != nil {
 		return nil, err
 	}
-	for i := uint64(0); i < forgottenTopicCount; i++ {
+	log.Printf("Fetch request with %d forgotten topics", forgottenTopicCount)
+	for range forgottenTopicCount {
 		var forgottenTopic ForgottenFetchTopic
 		topicId, err := d.UUID()
 		if err != nil {
@@ -411,28 +427,29 @@ func parseFetchRequest(d *Decoder) (*FetchRequest, error) {
 		if err != nil {
 			return nil, err
 		}
-		for j := uint64(0); j < partitionCount; j++ {
+		for range partitionCount {
 			partition, err := d.Int32()
 			if err != nil {
 				return nil, err
 			}
 			forgottenTopic.partitions = append(forgottenTopic.partitions, partition)
 		}
-		d.Int8() // tag buffer
-	}
-	// 1 byte tag buffer
-	_, err = d.Int8()
-	if err != nil {
-		return nil, err
+		_, err = d.Int8() // tag buffer
+		if err != nil {
+			return nil, err
+		}
+		forgottenTopics = append(forgottenTopics, forgottenTopic)
 	}
 
 	fetchRequest := &FetchRequest{
-		maxWait:        maxWait,
-		minBytes:       minBytes,
-		maxBytes:       maxBytes,
-		isolationLevel: isolationLevel,
-		sessionId:      sessionId,
-		sessionEpoch:   sessionEpoch,
+		maxWait:         maxWait,
+		minBytes:        minBytes,
+		maxBytes:        maxBytes,
+		isolationLevel:  isolationLevel,
+		sessionId:       sessionId,
+		sessionEpoch:    sessionEpoch,
+		topics:          topics,
+		forgottenTopics: forgottenTopics,
 	}
 	return fetchRequest, nil
 }
@@ -450,7 +467,35 @@ func writeFetchResponse(e *Encoder, fetchRequest *FetchRequest) {
 	for _, topic := range fetchRequest.topics {
 		// topic id
 		e.UUID(topic.topicId)
-		
+
+		e.UVarint(uint64(len(topic.partitions) + 1))
+		for _, partition := range topic.partitions {
+			// partition index
+			e.Int32(partition.partition)
+			// error code
+			e.Int16(UNKNOWN_TOPIC_ID_ERR)
+			// high watermark
+			e.Int64(-1)
+			// last stable offset
+			e.Int64(-1)
+			// log start offset
+			e.Int64(-1)
+			// aborted transactions array length (0 for now)
+			e.UVarint(1)
+			// preferred read replica
+			e.Int32(-1)
+			// record set (empty for now)
+			e.UVarint(1)
+			// partition authorized operations
+			// e.Int32(0)
+			// tag buffer
+			e.Int8(TAG_BUFFER)
+		}
+		// topic authorized operations
+		// e.Int32(0)
+		// tag buffer
+		e.Int8(TAG_BUFFER)
+	}
 
 	// tag buffer
 	e.Int8(TAG_BUFFER)
